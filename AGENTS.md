@@ -4,10 +4,11 @@
 
 This repo contains `sync.py`: a Python script that syncs cert-manager-issued TLS
 certificates to OCI Certificate Service (IMPORTED cert type). It runs as a daily
-Kubernetes CronJob on the TIE platform OKE cluster, enabling the hub OCI Load Balancer
-to serve Let's Encrypt certificates managed by cert-manager.
+Kubernetes CronJob, enabling an OCI Load Balancer to serve Let's Encrypt certificates
+managed by cert-manager.
 
-Deployed via ArgoCD from `k8s-public-platform-system` → `addons/cert-sync-to-oci/`.
+Deployed via ArgoCD or any GitOps toolchain by adding the CronJob manifest to your
+platform cluster.
 
 ## Repository Shape
 
@@ -33,7 +34,7 @@ tests/
 1. cert-manager `Certificate` objects are annotated with the target OCI cert OCID:
    ```yaml
    annotations:
-     oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1.eu-zurich-1.xxxxx"
+     oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1.<region>.xxxxx"
    ```
 2. The CronJob runs daily, lists all annotated `Certificate` objects cluster-wide,
    reads their K8s TLS Secrets, and calls `CertificatesManagementClient.update_certificate()`
