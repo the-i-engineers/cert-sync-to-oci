@@ -135,7 +135,7 @@ def test_build_oci_client_from_secret(monkeypatch):
     fake_secret = _make_oci_profile_secret(
         tenancy="ocid1.tenancy.oc1..t",
         user="ocid1.user.oc1..u",
-        region="eu-zurich-1",
+        region="us-phoenix-1",
         fingerprint="aa:bb:cc",
         private_key="-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n",
         passphrase="s3cr3t",
@@ -149,7 +149,7 @@ def test_build_oci_client_from_secret(monkeypatch):
 
     assert captured_config["tenancy"] == "ocid1.tenancy.oc1..t"
     assert captured_config["user"] == "ocid1.user.oc1..u"
-    assert captured_config["region"] == "eu-zurich-1"
+    assert captured_config["region"] == "us-phoenix-1"
     assert captured_config["fingerprint"] == "aa:bb:cc"
     assert "KEY" in captured_config["key_content"]
     assert captured_config["pass_phrase"] == "s3cr3t"
@@ -170,7 +170,7 @@ def test_build_oci_client_from_secret_no_passphrase(monkeypatch):
     fake_secret = _make_oci_profile_secret(
         tenancy="ocid1.tenancy.oc1..t",
         user="ocid1.user.oc1..u",
-        region="eu-zurich-1",
+        region="us-phoenix-1",
         fingerprint="aa:bb:cc",
         private_key="KEY_PEM",
         # no passphrase key
