@@ -1,12 +1,15 @@
 name: Release
 
-# Triggered by daily-tag-release.yml via a GitHub Release (release: published).
-# Also supports manual dispatch for ad-hoc builds.
+# Triggered on push of tags matching `v*` (for example, `v0.1.2`).
+# In the normal release flow, daily-tag-release.yml creates and pushes that tag using GH_PAT.
+# This is required because pushes made with GITHUB_TOKEN do not trigger downstream workflows.
+# Also supports manual dispatch for ad-hoc builds by specifying a tag input.
 # Builds and publishes the Docker image to ghcr.io.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -59,7 +62,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ steps.ref.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ steps.ref.outputs.tag }}
             type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
