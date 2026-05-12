@@ -63,16 +63,33 @@ def read_tls_secret(core_api, namespace, secret_name):
     return tls_crt, tls_key
 
 
+_REQUIRED_SECRET_KEYS = ("tenancy", "user", "region", "fingerprint", "privateKey")
+
+
 def build_oci_client_from_secret(core_api, namespace, secret_name):
     """Build a CertificatesManagementClient from OCI API key credentials in a K8s Secret.
 
     Secret keys (matching cert-manager-webhook-oci):
       tenancy, user, region, fingerprint, privateKey, privateKeyPassphrase (optional)
+
+    Raises ValueError with a descriptive message if required keys are missing or
+    if any value cannot be base64/UTF-8 decoded.
     """
     secret = core_api.read_namespaced_secret(secret_name, namespace)
+    data = secret.data or {}
+    ref = f"{namespace}/{secret_name}"
+
+    missing = [k for k in _REQUIRED_SECRET_KEYS if k not in data]
+    if missing:
+        raise ValueError(
+            f"Secret {ref} is missing required key(s): {missing}. Required keys: {list(_REQUIRED_SECRET_KEYS)}"
+        )
 
     def field(key):
-        return base64.b64decode(secret.data[key]).decode()
+        try:
+            return base64.b64decode(data[key]).decode()
+        except Exception as exc:
+            raise ValueError(f"Secret {ref} key '{key}': {exc}") from exc
 
     config = {
         "tenancy": field("tenancy"),
@@ -81,9 +98,12 @@ def build_oci_client_from_secret(core_api, namespace, secret_name):
         "region": field("region"),
         "key_content": field("privateKey"),
     }
-    raw_passphrase = secret.data.get("privateKeyPassphrase")
+    raw_passphrase = data.get("privateKeyPassphrase")
     if raw_passphrase:
-        passphrase = base64.b64decode(raw_passphrase).decode().strip()
+        try:
+            passphrase = base64.b64decode(raw_passphrase).decode().strip()
+        except Exception as exc:
+            raise ValueError(f"Secret {ref} key 'privateKeyPassphrase': {exc}") from exc
         if passphrase:
             config["pass_phrase"] = passphrase
 

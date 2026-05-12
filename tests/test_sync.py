@@ -185,6 +185,79 @@ def test_build_oci_client_from_secret_no_passphrase(monkeypatch):
     assert "pass_phrase" not in captured_config
 
 
+def test_build_oci_client_from_secret_missing_one_key(monkeypatch):
+    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
+    fake_secret = _make_oci_profile_secret(
+        tenancy="ocid1.tenancy.oc1..t",
+        user="ocid1.user.oc1..u",
+        region="us-phoenix-1",
+        fingerprint="aa:bb:cc",
+        private_key="KEY_PEM",
+    )
+    # Remove one required key
+    del fake_secret.data["privateKey"]
+
+    class FakeCoreApi:
+        def read_namespaced_secret(self, name, namespace):
+            return fake_secret
+
+    with pytest.raises(ValueError) as exc_info:
+        sync.build_oci_client_from_secret(FakeCoreApi(), "cert-manager", "oci-creds")
+
+    msg = str(exc_info.value)
+    assert "cert-manager/oci-creds" in msg
+    assert "privateKey" in msg
+    assert "Required keys:" in msg
+
+
+def test_build_oci_client_from_secret_missing_multiple_keys(monkeypatch):
+    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
+    fake_secret = _make_oci_profile_secret(
+        tenancy="ocid1.tenancy.oc1..t",
+        user="ocid1.user.oc1..u",
+        region="us-phoenix-1",
+        fingerprint="aa:bb:cc",
+        private_key="KEY_PEM",
+    )
+    del fake_secret.data["tenancy"]
+    del fake_secret.data["fingerprint"]
+
+    class FakeCoreApi:
+        def read_namespaced_secret(self, name, namespace):
+            return fake_secret
+
+    with pytest.raises(ValueError) as exc_info:
+        sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
+
+    msg = str(exc_info.value)
+    assert "tenancy" in msg
+    assert "fingerprint" in msg
+
+
+def test_build_oci_client_from_secret_invalid_base64(monkeypatch):
+    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
+    fake_secret = _make_oci_profile_secret(
+        tenancy="ocid1.tenancy.oc1..t",
+        user="ocid1.user.oc1..u",
+        region="us-phoenix-1",
+        fingerprint="aa:bb:cc",
+        private_key="KEY_PEM",
+    )
+    # Corrupt the tenancy value (not valid base64)
+    fake_secret.data["tenancy"] = "!!!not-base64!!!"
+
+    class FakeCoreApi:
+        def read_namespaced_secret(self, name, namespace):
+            return fake_secret
+
+    with pytest.raises(ValueError) as exc_info:
+        sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
+
+    msg = str(exc_info.value)
+    assert "ns1/oci-creds" in msg
+    assert "'tenancy'" in msg
+
+
 # ---------------------------------------------------------------------------
 # push_to_oci
 # ---------------------------------------------------------------------------
