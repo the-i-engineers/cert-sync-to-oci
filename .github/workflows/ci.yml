@@ -1,24 +1,19 @@
-name: CI/CD
+name: CI
 
 on:
-  push:
-    branches: ["main"]
   pull_request:
-  workflow_dispatch:
+    branches:
+      - main
 
 permissions:
   contents: read
   checks: write
   pull-requests: write
 
-concurrency:
-  group: ci-cd-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   ci:
     name: CI
-    runs-on: ${{ vars.REPOSITORY_RUNNER }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
@@ -30,10 +25,10 @@ jobs:
           python-version-file: .python-version
           cache: pip
 
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements_dev.txt
+          pip install -r requirements.txt -r requirements_dev.txt
 
       - name: Lint with Ruff
         run: ruff check --output-format=github --line-length=120
@@ -55,7 +50,6 @@ jobs:
           reporter: java-junit
 
       - name: Report coverage in PR
-        if: github.event_name == 'pull_request'
         uses: MishaKav/pytest-coverage-comment@dd5b80bde6d16941f336518e92929e89069d8451 # v1.7.2
         with:
           pytest-xml-coverage-path: coverage.xml
@@ -84,43 +78,3 @@ jobs:
             echo "| **Actor** | ${{ github.actor }} |"
             echo "| **Event** | \`${{ github.event_name }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
-
-  docker:
-    name: Docker
-    needs: ci-required
-    runs-on: ${{ vars.REPOSITORY_RUNNER }}
-    timeout-minutes: 20
-    permissions:
-      packages: write
-      contents: read
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
-        with:
-          images: ghcr.io/the-i-engineers/cert-sync-to-oci
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-
-      - name: Login to ghcr.io
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
-        with:
-          context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
