@@ -87,7 +87,7 @@ def build_oci_client_from_secret(core_api, namespace, secret_name):
 
     def field(key):
         try:
-            return base64.b64decode(data[key]).decode()
+            return base64.b64decode(data[key], validate=True).decode()
         except Exception as exc:
             raise ValueError(f"Secret {ref} key '{key}': {exc}") from exc
 
@@ -101,7 +101,7 @@ def build_oci_client_from_secret(core_api, namespace, secret_name):
     raw_passphrase = data.get("privateKeyPassphrase")
     if raw_passphrase:
         try:
-            passphrase = base64.b64decode(raw_passphrase).decode().strip()
+            passphrase = base64.b64decode(raw_passphrase, validate=True).decode().strip()
         except Exception as exc:
             raise ValueError(f"Secret {ref} key 'privateKeyPassphrase': {exc}") from exc
         if passphrase:
@@ -140,10 +140,12 @@ def main():
 
     core_api, custom_api = load_k8s_client()
 
-    # Instance principal client is created lazily so that clusters running
-    # entirely on API key auth don't fail at startup if instance principal
-    # metadata is unavailable.
+    # Lazily-created clients:
+    # - instance_principal_client: shared across all certs with no profile secret
+    # - api_key_clients: cached per (namespace, secret_name) to avoid re-reading
+    #   the same K8s Secret for every cert that shares the same credentials.
     instance_principal_client = None
+    api_key_clients: dict = {}
 
     errors = []
     synced = 0
@@ -152,8 +154,16 @@ def main():
         print(f"Syncing {ns}/{cert_name} (secret: {secret_name}) -> {oci_cert_id}")
         try:
             tls_crt, tls_key = read_tls_secret(core_api, ns, secret_name)
-            if oci_profile_secret:
-                certs_client = build_oci_client_from_secret(core_api, ns, oci_profile_secret)
+            if oci_profile_secret is not None:
+                oci_profile_secret = oci_profile_secret.strip()
+                if not oci_profile_secret:
+                    raise ValueError(
+                        f"{ns}/{cert_name}: annotation '{OCI_PROFILE_SECRET_ANNOTATION}' is present but empty"
+                    )
+                cache_key = (ns, oci_profile_secret)
+                if cache_key not in api_key_clients:
+                    api_key_clients[cache_key] = build_oci_client_from_secret(core_api, ns, oci_profile_secret)
+                certs_client = api_key_clients[cache_key]
             else:
                 if instance_principal_client is None:
                     instance_principal_client = build_oci_client_instance_principal()

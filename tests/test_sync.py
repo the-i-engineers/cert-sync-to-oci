@@ -422,3 +422,60 @@ def test_main_success_mixed_auth(monkeypatch):
     assert len(pushed) == 2
     assert "ocid1..aaa" in pushed
     assert "ocid1..bbb" in pushed
+
+
+# ---------------------------------------------------------------------------
+# main — empty annotation value raises error
+# ---------------------------------------------------------------------------
+
+
+def test_main_empty_profile_secret_annotation_raises_error(monkeypatch):
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr(
+        "sync.build_oci_client_instance_principal",
+        lambda: (_ for _ in ()).throw(AssertionError("should not fall back to instance principal")),
+    )
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        # annotation present but empty (whitespace)
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", "  ")]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main()
+
+    assert exc_info.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# main — API key client cached across certs sharing same secret
+# ---------------------------------------------------------------------------
+
+
+def test_main_api_key_client_cached_for_same_secret(monkeypatch):
+    build_calls = []
+
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
+    monkeypatch.setattr(
+        "sync.build_oci_client_from_secret",
+        lambda core_api, ns, name: build_calls.append((ns, name)) or object(),
+    )
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter(
+            [
+                ("ns1", "cert-a", "secret-a", "ocid1..aaa", "oci-creds"),
+                ("ns1", "cert-b", "secret-b", "ocid1..bbb", "oci-creds"),  # same secret
+                ("ns1", "cert-c", "secret-c", "ocid1..ccc", "other-creds"),  # different secret
+            ]
+        ),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
+
+    sync.main()
+
+    # oci-creds built once, other-creds built once → 2 total builds
+    assert build_calls == [("ns1", "oci-creds"), ("ns1", "other-creds")]
