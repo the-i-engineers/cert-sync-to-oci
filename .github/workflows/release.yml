@@ -14,16 +14,13 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
   build:
     name: Build and push Docker image
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
 
     steps:
       - name: Resolve tag
