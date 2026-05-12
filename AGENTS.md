@@ -40,17 +40,23 @@ tests/
    reads their K8s TLS Secrets, and calls `CertificatesManagementClient.update_certificate()`
    to import the new cert/key into OCI.
 3. OCI LB automatically picks up the latest certificate version — no Terraform change needed on rotation.
-4. Authentication: OCI instance principal (OKE node identity) — no stored credentials.
+4. Authentication: OCI instance principal (OKE node identity) by default, or per-cert
+   API key credentials from a K8s Secret (see `oci-cert-sync/oci-profile-secret` annotation).
 
 ## Key Code Paths
 
 - **`list_annotated_certificates(custom_api)`** — lists all `cert-manager.io/v1` Certificate
-  objects cluster-wide; yields `(namespace, name, secretName, ociCertOcid)` for annotated ones.
+  objects cluster-wide; yields `(namespace, name, secretName, ociCertOcid, ociProfileSecret)`
+  for annotated ones. `ociProfileSecret` is `None` when the `oci-cert-sync/oci-profile-secret`
+  annotation is absent (→ instance principal auth).
+- **`build_oci_client_from_secret(core_api, namespace, secret_name)`** — reads OCI API key
+  credentials from a K8s Secret; raises `ValueError` with context on missing/invalid fields.
 - **`read_tls_secret(core_api, namespace, secret_name)`** — reads K8s Secret, base64-decodes
   `tls.crt` and `tls.key`.
 - **`push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)`** — calls
   `update_certificate()` with `UpdateCertificateByImportingConfigDetails` (config_type=IMPORTED).
-- **`main()`** — orchestrates all of the above; exits 1 if any cert fails (others still sync).
+- **`main()`** — orchestrates all of the above; API key clients are cached per
+  `(namespace, secret_name)`; exits 1 if any cert fails (others still sync).
 
 ## OCI SDK Notes
 
