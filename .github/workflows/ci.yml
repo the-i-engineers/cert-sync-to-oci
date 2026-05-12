@@ -13,7 +13,7 @@ permissions:
 jobs:
   ci:
     name: CI
-    runs-on: ${{ vars.REPOSITORY_RUNNER }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
