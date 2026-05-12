@@ -1,6 +1,6 @@
 # cert-sync-to-oci
 
-[![CI/CD](https://github.com/the-i-engineers/cert-sync-to-oci/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/the-i-engineers/cert-sync-to-oci/actions/workflows/ci-cd.yml)
+[![CI](https://github.com/the-i-engineers/cert-sync-to-oci/actions/workflows/ci.yml/badge.svg)](https://github.com/the-i-engineers/cert-sync-to-oci/actions/workflows/ci.yml)
 
 A Python CronJob that syncs [cert-manager](https://cert-manager.io/) TLS secrets to [OCI Certificate Service](https://docs.oracle.com/en-us/iaas/Content/certificates/home.htm) as IMPORTED certificate versions. When cert-manager renews a certificate, the CronJob automatically pushes the new TLS data to the corresponding OCI Certificate — keeping load balancer listeners and other OCI resources that reference the certificate up to date without manual intervention.
 
@@ -29,7 +29,7 @@ cert-manager must be installed and managing `Certificate` resources in the clust
 
 ## Usage / Deployment
 
-The CronJob is deployed via the `k8s-public-platform-system` ArgoCD addon. The Docker image is published to:
+Deploy the CronJob manifest to your cluster (e.g. via ArgoCD, Flux, or `kubectl apply`). The Docker image is published to:
 
 ```
 ghcr.io/the-i-engineers/cert-sync-to-oci:main
@@ -44,7 +44,7 @@ metadata:
   name: my-cert
   namespace: my-namespace
   annotations:
-    oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1.eu-frankfurt-1.amaaaa..."
+    oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1..<region>.amaaaa..."
 spec:
   secretName: my-cert-tls
   # ... rest of spec
