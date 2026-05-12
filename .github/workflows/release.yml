@@ -1,9 +1,9 @@
 name: Release
 
-# Triggered automatically when daily-tag-release.yml pushes a semver tag via GH_PAT.
-# The push: tags trigger fires only when the tag is pushed by a non-GITHUB_TOKEN identity
-# (PAT), bypassing GitHub's suppression of GITHUB_TOKEN-originated events.
-# Also supports manual dispatch for ad-hoc builds.
+# Triggered on push of tags matching `v*` (for example, `v0.1.2`).
+# In the normal release flow, daily-tag-release.yml creates and pushes that tag using GH_PAT.
+# This is required because pushes made with GITHUB_TOKEN do not trigger downstream workflows.
+# Also supports manual dispatch for ad-hoc builds by specifying a tag input.
 # Builds and publishes the Docker image to ghcr.io.
 
 on:
