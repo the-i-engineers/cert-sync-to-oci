@@ -1,0 +1,33 @@
+name: Daily Tag Release
+
+# Creates a semver tag and GitHub Release daily from conventional commits.
+# The GitHub Release fires the release: published trigger in release.yml,
+# which builds and publishes the Docker image.
+#
+# Bump rules: https://github.com/the-i-engineers/infrastructure/blob/main/docs/contributing/conventional-commits.md
+
+on:
+  schedule:
+    - cron: '30 3 * * *'  # 03:30 UTC (04:30 CET / 05:30 CEST)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Calculate next version without creating tags or releases'
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Daily semver tag
+    permissions:
+      contents: write
+    uses: the-i-engineers/github-actions/.github/workflows/scheduled-tag-release.yml@v1.0.0
+    with:
+      cadence: daily
+      dry_run: ${{ inputs.dry_run == true }}
+    secrets:
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
