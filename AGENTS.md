@@ -34,7 +34,7 @@ tests/
 1. cert-manager `Certificate` objects are annotated with the target OCI cert OCID:
    ```yaml
    annotations:
-     oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1..<region>.xxxxx"
+     oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1.<region>.xxxxx"
    ```
 2. The CronJob runs daily, lists all annotated `Certificate` objects cluster-wide,
    reads their K8s TLS Secrets, and calls `CertificatesManagementClient.update_certificate()`
