@@ -3,30 +3,56 @@
 cert-sync-to-oci: sync cert-manager TLS secrets to OCI Certificate Service.
 
 Iterates all cert-manager Certificate objects cluster-wide. For each object
-annotated with `oci-cert-sync/certificate-ocid: <ocid>`, reads the K8s TLS
-Secret and pushes a new imported cert version to OCI Certificate Service.
+annotated with the required annotations, reads the K8s TLS Secret and either
+creates or updates an IMPORTED certificate in OCI Certificate Service.
 
-Authentication (per certificate):
-  - If the Certificate is annotated with `oci-cert-sync/oci-profile-secret: <name>`,
-    reads that K8s Secret (same namespace as the Certificate) for OCI API key
-    credentials. This allows certs to be pushed to any OCI tenancy, including
-    sovereign cloud tenancies.
+## Annotations
+
+### Name-based mode (recommended — auto-creates the OCI cert on first run)
+
+    oci-cert-sync/certificate-name: <oci-cert-name>
+    oci-cert-sync/compartment-id:   <compartment-ocid>
+
+The OCI certificate is looked up by name in the given compartment. If it does
+not exist it is created automatically (IMPORTED type). The TLS secret content
+is set at creation time, so no extra update call is made. On subsequent runs
+the existing cert is updated with a new version.
+
+### OCID mode (legacy — requires pre-created OCI cert)
+
+    oci-cert-sync/certificate-ocid: <ocid>
+
+The OCI certificate must already exist. A new IMPORTED version is pushed on
+every run. Cannot be combined with certificate-name — set one or the other.
+
+## Authentication (per Certificate)
+
+  - If annotated with `oci-cert-sync/oci-profile-secret: <secret-name>`,
+    reads that K8s Secret (in the same namespace as the Certificate) for OCI
+    API key credentials. Allows certs to be pushed to any OCI tenancy.
   - Otherwise falls back to OCI instance principal (OKE node identity).
     The instance principal client is created lazily and shared across all certs
     that do not specify a profile secret.
 
-OCI profile secret keys (matching cert-manager-webhook-oci convention):
+## OCI profile secret keys (matching cert-manager-webhook-oci convention)
+
   tenancy, user, region, fingerprint, privateKey, privateKeyPassphrase (optional)
 """
 
 import base64
+import hashlib
 import sys
 
 import oci
 from kubernetes import client, config as k8s_config
 
-ANNOTATION = "oci-cert-sync/certificate-ocid"
+ANNOTATION_CERT_OCID = "oci-cert-sync/certificate-ocid"
+ANNOTATION_CERT_NAME = "oci-cert-sync/certificate-name"
+ANNOTATION_COMPARTMENT_ID = "oci-cert-sync/compartment-id"
 OCI_PROFILE_SECRET_ANNOTATION = "oci-cert-sync/oci-profile-secret"
+
+# Alias for backwards compatibility with external code that imports sync.ANNOTATION.
+ANNOTATION = ANNOTATION_CERT_OCID
 
 
 def load_k8s_client():
@@ -38,6 +64,16 @@ def load_k8s_client():
 
 
 def list_annotated_certificates(custom_api):
+    """Yield one entry per actionable Certificate object.
+
+    Yields 7-tuples:
+        (namespace, cert_name, secret_name, oci_cert_id, oci_profile_secret,
+         oci_cert_name, oci_compartment_id)
+
+    Exactly one of (oci_cert_id) or (oci_cert_name + oci_compartment_id) will
+    be non-None per yielded entry. Invalid combinations are skipped with a
+    warning printed to stderr.
+    """
     certs = custom_api.list_cluster_custom_object(
         group="cert-manager.io",
         version="v1",
@@ -45,15 +81,41 @@ def list_annotated_certificates(custom_api):
     )
     for cert in certs.get("items", []):
         annotations = cert.get("metadata", {}).get("annotations", {})
-        oci_cert_id = annotations.get(ANNOTATION)
-        if oci_cert_id:
-            yield (
-                cert["metadata"]["namespace"],
-                cert["metadata"]["name"],
-                cert["spec"]["secretName"],
-                oci_cert_id,
-                annotations.get(OCI_PROFILE_SECRET_ANNOTATION),  # None → instance principal
+        ns = cert["metadata"]["namespace"]
+        name = cert["metadata"]["name"]
+        ref = f"{ns}/{name}"
+
+        oci_cert_id = annotations.get(ANNOTATION_CERT_OCID, "").strip() or None
+        oci_cert_name = annotations.get(ANNOTATION_CERT_NAME, "").strip() or None
+        oci_compartment_id = annotations.get(ANNOTATION_COMPARTMENT_ID, "").strip() or None
+
+        if not oci_cert_id and not oci_cert_name:
+            continue  # no relevant annotation
+
+        if oci_cert_id and oci_cert_name:
+            print(
+                f"  ⚠ SKIP {ref}: both '{ANNOTATION_CERT_OCID}' and '{ANNOTATION_CERT_NAME}' "
+                f"are set — use one or the other",
+                file=sys.stderr,
             )
+            continue
+
+        if oci_cert_name and not oci_compartment_id:
+            print(
+                f"  ⚠ SKIP {ref}: '{ANNOTATION_CERT_NAME}' requires '{ANNOTATION_COMPARTMENT_ID}' to also be set",
+                file=sys.stderr,
+            )
+            continue
+
+        yield (
+            ns,
+            name,
+            cert["spec"]["secretName"],
+            oci_cert_id,
+            annotations.get(OCI_PROFILE_SECRET_ANNOTATION),  # None → instance principal
+            oci_cert_name,
+            oci_compartment_id,
+        )
 
 
 def read_tls_secret(core_api, namespace, secret_name):
@@ -116,6 +178,87 @@ def build_oci_client_instance_principal():
     return oci.certificates_management.CertificatesManagementClient(config={}, signer=signer)
 
 
+def find_oci_cert(certs_client, compartment_id, cert_name):
+    """Look up an OCI Certificate by name in a compartment.
+
+    Returns the certificate OCID if exactly one match is found, or None if no
+    certificates with that name exist. Raises ValueError if multiple certificates
+    share the same name (which OCI allows but is ambiguous for our purposes).
+    """
+    response = certs_client.list_certificates(
+        compartment_id=compartment_id,
+        name=cert_name,
+    )
+    items = response.data.items
+    if not items:
+        return None
+    if len(items) > 1:
+        raise ValueError(
+            f"Found {len(items)} OCI certificates named '{cert_name}' in compartment "
+            f"{compartment_id} — names must be unique for auto-create to work"
+        )
+    return items[0].id
+
+
+def create_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
+    """Create a new IMPORTED OCI Certificate with the given PEM content.
+
+    Returns the OCID of the newly created certificate.
+
+    A deterministic opc_retry_token (SHA-256 of compartment_id+cert_name) is
+    passed so that OCI deduplicates retries of the same logical create request.
+    If OCI returns a conflict (409) indicating a cert with this name was created
+    concurrently, find_oci_cert is called to retrieve the existing cert's OCID,
+    making the create path effectively idempotent.
+
+    LE tls.crt contains the full chain (leaf + intermediates). OCI expects
+    cert_chain_pem = intermediates and certificate_pem = leaf. Passing the
+    full chain for both is accepted and safe.
+    """
+    retry_token = hashlib.sha256(f"{compartment_id}:{cert_name}".encode()).hexdigest()[:64]
+    create_details = oci.certificates_management.models.CreateCertificateDetails(
+        name=cert_name,
+        compartment_id=compartment_id,
+        certificate_config=oci.certificates_management.models.CreateCertificateByImportingConfigDetails(
+            config_type="IMPORTED",
+            cert_chain_pem=tls_crt,
+            certificate_pem=tls_crt,
+            private_key_pem=tls_key,
+        ),
+    )
+    try:
+        response = certs_client.create_certificate(
+            create_certificate_details=create_details,
+            opc_retry_token=retry_token,
+        )
+        return response.data.id
+    except oci.exceptions.ServiceError as exc:
+        if exc.status == 409:
+            # A cert with this name was created concurrently (or a previous run
+            # succeeded after a transient failure hid the response). Re-look up
+            # by name to retrieve the existing cert's OCID.
+            existing_ocid = find_oci_cert(certs_client, compartment_id, cert_name)
+            if existing_ocid is not None:
+                return existing_ocid
+        raise
+
+
+def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
+    """Find or create an IMPORTED OCI Certificate by name.
+
+    Returns (ocid, was_created):
+      - was_created=True  → certificate was just created; PEM content is already
+                            set at creation time, no update call is needed.
+      - was_created=False → certificate already existed; caller should call
+                            push_to_oci to upload a new version.
+    """
+    ocid = find_oci_cert(certs_client, compartment_id, cert_name)
+    if ocid is not None:
+        return ocid, False
+    ocid = create_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key)
+    return ocid, True
+
+
 def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
     # LE tls.crt contains the full chain (leaf + intermediates).
     # OCI expects cert_chain_pem = intermediates; certificate_pem = leaf.
@@ -150,10 +293,21 @@ def main():
     errors = []
     synced = 0
 
-    for ns, cert_name, secret_name, oci_cert_id, oci_profile_secret in list_annotated_certificates(custom_api):
-        print(f"Syncing {ns}/{cert_name} (secret: {secret_name}) -> {oci_cert_id}")
+    for (
+        ns,
+        cert_name,
+        secret_name,
+        oci_cert_id,
+        oci_profile_secret,
+        oci_cert_name,
+        oci_compartment_id,
+    ) in list_annotated_certificates(custom_api):
+        mode = f"name={oci_cert_name}" if oci_cert_name else f"ocid={oci_cert_id}"
+        print(f"Syncing {ns}/{cert_name} (secret: {secret_name}, {mode})")
         try:
             tls_crt, tls_key = read_tls_secret(core_api, ns, secret_name)
+
+            # Build OCI client (API key or instance principal).
             if oci_profile_secret is not None:
                 oci_profile_secret = oci_profile_secret.strip()
                 if not oci_profile_secret:
@@ -168,6 +322,16 @@ def main():
                 if instance_principal_client is None:
                     instance_principal_client = build_oci_client_instance_principal()
                 certs_client = instance_principal_client
+
+            # Push content to OCI.
+            if oci_cert_name:
+                oci_cert_id, created = ensure_oci_cert(
+                    certs_client, oci_compartment_id, oci_cert_name, tls_crt, tls_key
+                )
+                if created:
+                    print(f"  ✓ created new OCI cert '{oci_cert_name}' ({oci_cert_id})")
+                    synced += 1
+                    continue  # content already set at creation time
             push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
             synced += 1
         except Exception as exc:
