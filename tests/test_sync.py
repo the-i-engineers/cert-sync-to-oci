@@ -1,6 +1,7 @@
 import base64
 import types
 
+import oci
 import pytest
 
 import sync
@@ -611,7 +612,7 @@ def test_create_oci_cert_calls_api(monkeypatch):
     )
 
     class FakeClient:
-        def create_certificate(self, create_certificate_details):
+        def create_certificate(self, create_certificate_details, opc_retry_token=None):
             calls.append(create_certificate_details)
             return types.SimpleNamespace(data=types.SimpleNamespace(id="ocid1.cert..new"))
 
@@ -717,3 +718,170 @@ def test_main_name_based_existing_calls_push(monkeypatch):
     sync.main()
 
     assert push_calls == ["ocid1.cert..existing"]
+
+
+# ---------------------------------------------------------------------------
+# list_annotated_certificates — whitespace normalization
+# ---------------------------------------------------------------------------
+
+
+def test_list_annotated_certificates_whitespace_ocid_skips():
+    """A certificate-ocid annotation containing only whitespace is treated as absent."""
+    certs = [_make_cert("ns1", "cert-a", "secret-a", annotation_value="   ")]
+    api = FakeCustomApi(certs)
+    results = list(sync.list_annotated_certificates(api))
+    assert results == []
+
+
+def test_list_annotated_certificates_whitespace_cert_name_skips(capsys):
+    """A certificate-name annotation containing only whitespace is treated as absent."""
+    certs = [_make_cert("ns1", "cert-a", "secret-a", cert_name="  ", compartment_id="ocid1.compartment..cmp")]
+    api = FakeCustomApi(certs)
+    results = list(sync.list_annotated_certificates(api))
+    assert results == []
+
+
+def test_list_annotated_certificates_whitespace_compartment_id_skips(capsys):
+    """A compartment-id annotation containing only whitespace is treated as absent → skip with warning."""
+    certs = [_make_cert("ns1", "cert-a", "secret-a", cert_name="my-cert", compartment_id="  ")]
+    api = FakeCustomApi(certs)
+    results = list(sync.list_annotated_certificates(api))
+    assert results == []
+    captured = capsys.readouterr()
+    assert "compartment-id" in captured.err
+
+
+def test_list_annotated_certificates_strips_annotation_values():
+    """Leading/trailing whitespace on valid annotations is stripped before yielding."""
+    certs = [
+        _make_cert("ns1", "cert-a", "secret-a", annotation_value="  ocid1.cert..aaa  "),
+    ]
+    api = FakeCustomApi(certs)
+    results = list(sync.list_annotated_certificates(api))
+    assert len(results) == 1
+    assert results[0][3] == "ocid1.cert..aaa"  # oci_cert_id stripped
+
+
+def test_list_annotated_certificates_strips_cert_name_and_compartment():
+    """Leading/trailing whitespace on certificate-name and compartment-id is stripped."""
+    certs = [
+        _make_cert(
+            "ns1",
+            "cert-a",
+            "secret-a",
+            cert_name="  my-cert  ",
+            compartment_id="  ocid1.compartment..cmp  ",
+        ),
+    ]
+    api = FakeCustomApi(certs)
+    results = list(sync.list_annotated_certificates(api))
+    assert len(results) == 1
+    assert results[0][5] == "my-cert"  # oci_cert_name stripped
+    assert results[0][6] == "ocid1.compartment..cmp"  # oci_compartment_id stripped
+
+
+# ---------------------------------------------------------------------------
+# create_oci_cert — retry token + 409 conflict idempotency
+# ---------------------------------------------------------------------------
+
+
+def test_create_oci_cert_passes_retry_token(monkeypatch):
+    """create_oci_cert passes a deterministic opc_retry_token derived from compartment+name."""
+    import hashlib
+
+    tokens_seen = []
+
+    class FakeCreateConfigDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class FakeCreateDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateByImportingConfigDetails",
+        lambda **kw: FakeCreateConfigDetails(**kw),
+    )
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateDetails",
+        lambda **kw: FakeCreateDetails(**kw),
+    )
+
+    class FakeClient:
+        def create_certificate(self, create_certificate_details, opc_retry_token=None):
+            tokens_seen.append(opc_retry_token)
+            return types.SimpleNamespace(data=types.SimpleNamespace(id="ocid1.cert..new"))
+
+    sync.create_oci_cert(FakeClient(), "ocid1.compartment..cmp", "my-cert", "CERT", "KEY")
+
+    assert len(tokens_seen) == 1
+    expected = hashlib.sha256("ocid1.compartment..cmp:my-cert".encode()).hexdigest()[:64]
+    assert tokens_seen[0] == expected
+
+
+def test_create_oci_cert_409_conflict_returns_existing(monkeypatch):
+    """On 409 from OCI, create_oci_cert re-looks up the existing cert and returns its OCID."""
+
+    class FakeCreateConfigDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class FakeCreateDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateByImportingConfigDetails",
+        lambda **kw: FakeCreateConfigDetails(**kw),
+    )
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateDetails",
+        lambda **kw: FakeCreateDetails(**kw),
+    )
+
+    conflict_error = oci.exceptions.ServiceError(status=409, code="Conflict", headers={}, message="already exists")
+
+    class FakeClient:
+        def create_certificate(self, create_certificate_details, opc_retry_token=None):
+            raise conflict_error
+
+        def list_certificates(self, compartment_id, name):
+            return _make_list_response([_make_cert_summary("ocid1.cert..existing", name)])
+
+    result = sync.create_oci_cert(FakeClient(), "ocid1.compartment..cmp", "my-cert", "CERT", "KEY")
+    assert result == "ocid1.cert..existing"
+
+
+def test_create_oci_cert_non_409_raises(monkeypatch):
+    """Non-409 ServiceErrors from OCI are re-raised."""
+
+    class FakeCreateConfigDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class FakeCreateDetails:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateByImportingConfigDetails",
+        lambda **kw: FakeCreateConfigDetails(**kw),
+    )
+    monkeypatch.setattr(
+        "oci.certificates_management.models.CreateCertificateDetails",
+        lambda **kw: FakeCreateDetails(**kw),
+    )
+
+    auth_error = oci.exceptions.ServiceError(
+        status=403, code="NotAuthorizedOrNotFound", headers={}, message="not authorized"
+    )
+
+    class FakeClient:
+        def create_certificate(self, create_certificate_details, opc_retry_token=None):
+            raise auth_error
+
+    with pytest.raises(oci.exceptions.ServiceError) as exc_info:
+        sync.create_oci_cert(FakeClient(), "ocid1.compartment..cmp", "my-cert", "CERT", "KEY")
+
+    assert exc_info.value.status == 403

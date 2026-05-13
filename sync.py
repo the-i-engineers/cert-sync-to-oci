@@ -40,6 +40,7 @@ every run. Cannot be combined with certificate-name — set one or the other.
 """
 
 import base64
+import hashlib
 import sys
 
 import oci
@@ -50,7 +51,7 @@ ANNOTATION_CERT_NAME = "oci-cert-sync/certificate-name"
 ANNOTATION_COMPARTMENT_ID = "oci-cert-sync/compartment-id"
 OCI_PROFILE_SECRET_ANNOTATION = "oci-cert-sync/oci-profile-secret"
 
-# Keep the old constant as an alias so existing tests that import `sync.ANNOTATION` still work.
+# Alias for backwards compatibility with external code that imports sync.ANNOTATION.
 ANNOTATION = ANNOTATION_CERT_OCID
 
 
@@ -84,9 +85,9 @@ def list_annotated_certificates(custom_api):
         name = cert["metadata"]["name"]
         ref = f"{ns}/{name}"
 
-        oci_cert_id = annotations.get(ANNOTATION_CERT_OCID)
-        oci_cert_name = annotations.get(ANNOTATION_CERT_NAME)
-        oci_compartment_id = annotations.get(ANNOTATION_COMPARTMENT_ID)
+        oci_cert_id = annotations.get(ANNOTATION_CERT_OCID, "").strip() or None
+        oci_cert_name = annotations.get(ANNOTATION_CERT_NAME, "").strip() or None
+        oci_compartment_id = annotations.get(ANNOTATION_COMPARTMENT_ID, "").strip() or None
 
         if not oci_cert_id and not oci_cert_name:
             continue  # no relevant annotation
@@ -204,10 +205,17 @@ def create_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
 
     Returns the OCID of the newly created certificate.
 
+    A deterministic opc_retry_token (SHA-256 of compartment_id+cert_name) is
+    passed so that OCI deduplicates retries of the same logical create request.
+    If OCI returns a conflict (409) indicating a cert with this name was created
+    concurrently, find_oci_cert is called to retrieve the existing cert's OCID,
+    making the create path effectively idempotent.
+
     LE tls.crt contains the full chain (leaf + intermediates). OCI expects
     cert_chain_pem = intermediates and certificate_pem = leaf. Passing the
     full chain for both is accepted and safe.
     """
+    retry_token = hashlib.sha256(f"{compartment_id}:{cert_name}".encode()).hexdigest()[:64]
     create_details = oci.certificates_management.models.CreateCertificateDetails(
         name=cert_name,
         compartment_id=compartment_id,
@@ -218,8 +226,21 @@ def create_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
             private_key_pem=tls_key,
         ),
     )
-    response = certs_client.create_certificate(create_certificate_details=create_details)
-    return response.data.id
+    try:
+        response = certs_client.create_certificate(
+            create_certificate_details=create_details,
+            opc_retry_token=retry_token,
+        )
+        return response.data.id
+    except oci.exceptions.ServiceError as exc:
+        if exc.status == 409:
+            # A cert with this name was created concurrently (or a previous run
+            # succeeded after a transient failure hid the response). Re-look up
+            # by name to retrieve the existing cert's OCID.
+            existing_ocid = find_oci_cert(certs_client, compartment_id, cert_name)
+            if existing_ocid is not None:
+                return existing_ocid
+        raise
 
 
 def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
