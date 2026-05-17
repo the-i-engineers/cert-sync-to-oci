@@ -22,18 +22,27 @@ The sync is annotation-driven. For each `Certificate` object in the cluster, cer
 
 The CronJob runs on a schedule (e.g. daily) so that newly renewed certificates are pushed within 24 hours.
 
+## Authentication
+
+cert-sync-to-oci uses **OKE Workload Identity** exclusively. No credentials are stored in the cluster or in Git.
+
+At runtime the OCI SDK exchanges the pod's projected OIDC service-account token for a short-lived OCI session token (`OkeWorkloadIdentityResourcePrincipalSigner`). The CronJob service account must carry the `oci.oraclecloud.com/workload-identity: "true"` annotation.
+
 ## Prerequisites
 
 ### OCI IAM policy
 
-The identity used for OCI API calls must be granted permission to manage leaf certificates in the target compartment:
+An IAM policy must grant `manage leaf-certificate-family` in the target compartment, scoped to the workload identity:
 
 ```
-Allow <principal> to manage leaf-certificate-family in compartment <compartment>
+Allow any-user to manage leaf-certificate-family in compartment id <compartment-ocid>
+  where all {
+    request.principal.type        = 'workload',
+    request.principal.cluster_id  = '<cluster-ocid>',
+    request.principal.namespace   = 'cert-manager',
+    request.principal.service_account = 'cert-sync-to-oci'
+  }
 ```
-
-For instance-principal auth, `<principal>` is `dynamic-group <node-dynamic-group>`.  
-For API key auth, `<principal>` is `group <svc-group>`.
 
 ### cert-manager
 
@@ -58,8 +67,6 @@ metadata:
   annotations:
     oci-cert-sync/certificate-name: "my-oci-certificate-name"
     oci-cert-sync/compartment-id:   "ocid1.compartment.oc1..aaa..."
-    # optional: API key auth via K8s Secret (omit for instance principal)
-    oci-cert-sync/oci-profile-secret: "oci-credentials"
 spec:
   secretName: my-cert-tls
   # ... rest of spec
@@ -87,20 +94,6 @@ spec:
 | `oci-cert-sync/certificate-name` | name-based | Name of the OCI Certificate to look up or create. Requires `compartment-id`. |
 | `oci-cert-sync/compartment-id` | name-based | OCID of the compartment where the OCI Certificate lives or should be created. |
 | `oci-cert-sync/certificate-ocid` | OCID | OCID of an existing OCI Certificate to update. Cannot be combined with `certificate-name`. |
-| `oci-cert-sync/oci-profile-secret` | both | Name of a K8s Secret (in the Certificate's namespace) with OCI API key credentials. Omit to use instance principal auth. |
-
-### OCI profile secret keys
-
-The secret referenced by `oci-cert-sync/oci-profile-secret` must contain these keys (base64-encoded, matching the cert-manager-webhook-oci convention):
-
-| Key | Required | Description |
-|---|---|---|
-| `tenancy` | ✓ | OCI tenancy OCID |
-| `user` | ✓ | OCI user OCID |
-| `region` | ✓ | OCI region identifier (e.g. `eu-zurich-1`) |
-| `fingerprint` | ✓ | API key fingerprint |
-| `privateKey` | ✓ | PEM-encoded private key |
-| `privateKeyPassphrase` | — | Passphrase for encrypted private keys |
 
 ## Development
 
