@@ -25,18 +25,13 @@ the existing cert is updated with a new version.
 The OCI certificate must already exist. A new IMPORTED version is pushed on
 every run. Cannot be combined with certificate-name — set one or the other.
 
-## Authentication (per Certificate)
+## Authentication
 
-  - If annotated with `oci-cert-sync/oci-profile-secret: <secret-name>`,
-    reads that K8s Secret (in the same namespace as the Certificate) for OCI
-    API key credentials. Allows certs to be pushed to any OCI tenancy.
-  - Otherwise falls back to OCI instance principal (OKE node identity).
-    The instance principal client is created lazily and shared across all certs
-    that do not specify a profile secret.
-
-## OCI profile secret keys (matching cert-manager-webhook-oci convention)
-
-  tenancy, user, region, fingerprint, privateKey, privateKeyPassphrase (optional)
+OKE Workload Identity (OIDC token exchange). The CronJob's service account
+(`cert-sync-to-oci`) must be annotated with
+`oci.oraclecloud.com/workload-identity: "true"` and an IAM policy must grant
+`manage leaf-certificate-family` in the target compartment scoped to this
+cluster, namespace, and service account.
 """
 
 import base64
@@ -49,7 +44,6 @@ from kubernetes import client, config as k8s_config
 ANNOTATION_CERT_OCID = "oci-cert-sync/certificate-ocid"
 ANNOTATION_CERT_NAME = "oci-cert-sync/certificate-name"
 ANNOTATION_COMPARTMENT_ID = "oci-cert-sync/compartment-id"
-OCI_PROFILE_SECRET_ANNOTATION = "oci-cert-sync/oci-profile-secret"
 
 # Alias for backwards compatibility with external code that imports sync.ANNOTATION.
 ANNOTATION = ANNOTATION_CERT_OCID
@@ -66,9 +60,8 @@ def load_k8s_client():
 def list_annotated_certificates(custom_api):
     """Yield one entry per actionable Certificate object.
 
-    Yields 7-tuples:
-        (namespace, cert_name, secret_name, oci_cert_id, oci_profile_secret,
-         oci_cert_name, oci_compartment_id)
+    Yields 6-tuples:
+        (namespace, cert_name, secret_name, oci_cert_id, oci_cert_name, oci_compartment_id)
 
     Exactly one of (oci_cert_id) or (oci_cert_name + oci_compartment_id) will
     be non-None per yielded entry. Invalid combinations are skipped with a
@@ -112,10 +105,20 @@ def list_annotated_certificates(custom_api):
             name,
             cert["spec"]["secretName"],
             oci_cert_id,
-            annotations.get(OCI_PROFILE_SECRET_ANNOTATION),  # None → instance principal
             oci_cert_name,
             oci_compartment_id,
         )
+
+
+def build_oci_client_workload_identity():
+    """Build a CertificatesManagementClient using OKE Workload Identity (OIDC token exchange).
+
+    The CronJob service account must be annotated with
+    oci.oraclecloud.com/workload-identity: "true" and a matching IAM workload
+    identity policy must be in place. No credentials are stored in the cluster.
+    """
+    signer = oci.auth.signers.OkeWorkloadIdentityResourcePrincipalSigner()
+    return oci.certificates_management.CertificatesManagementClient(config={}, signer=signer)
 
 
 def read_tls_secret(core_api, namespace, secret_name):
@@ -123,59 +126,6 @@ def read_tls_secret(core_api, namespace, secret_name):
     tls_crt = base64.b64decode(secret.data["tls.crt"]).decode()
     tls_key = base64.b64decode(secret.data["tls.key"]).decode()
     return tls_crt, tls_key
-
-
-_REQUIRED_SECRET_KEYS = ("tenancy", "user", "region", "fingerprint", "privateKey")
-
-
-def build_oci_client_from_secret(core_api, namespace, secret_name):
-    """Build a CertificatesManagementClient from OCI API key credentials in a K8s Secret.
-
-    Secret keys (matching cert-manager-webhook-oci):
-      tenancy, user, region, fingerprint, privateKey, privateKeyPassphrase (optional)
-
-    Raises ValueError with a descriptive message if required keys are missing or
-    if any value cannot be base64/UTF-8 decoded.
-    """
-    secret = core_api.read_namespaced_secret(secret_name, namespace)
-    data = secret.data or {}
-    ref = f"{namespace}/{secret_name}"
-
-    missing = [k for k in _REQUIRED_SECRET_KEYS if k not in data]
-    if missing:
-        raise ValueError(
-            f"Secret {ref} is missing required key(s): {missing}. Required keys: {list(_REQUIRED_SECRET_KEYS)}"
-        )
-
-    def field(key):
-        try:
-            return base64.b64decode(data[key], validate=True).decode()
-        except Exception as exc:
-            raise ValueError(f"Secret {ref} key '{key}': {exc}") from exc
-
-    config = {
-        "tenancy": field("tenancy"),
-        "user": field("user"),
-        "fingerprint": field("fingerprint"),
-        "region": field("region"),
-        "key_content": field("privateKey"),
-    }
-    raw_passphrase = data.get("privateKeyPassphrase")
-    if raw_passphrase:
-        try:
-            passphrase = base64.b64decode(raw_passphrase, validate=True).decode().strip()
-        except Exception as exc:
-            raise ValueError(f"Secret {ref} key 'privateKeyPassphrase': {exc}") from exc
-        if passphrase:
-            config["pass_phrase"] = passphrase
-
-    return oci.certificates_management.CertificatesManagementClient(config=config)
-
-
-def build_oci_client_instance_principal():
-    """Build a CertificatesManagementClient using OKE instance principal (node identity)."""
-    signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
-    return oci.certificates_management.CertificatesManagementClient(config={}, signer=signer)
 
 
 def find_oci_cert(certs_client, compartment_id, cert_name):
@@ -283,12 +233,7 @@ def main():
 
     core_api, custom_api = load_k8s_client()
 
-    # Lazily-created clients:
-    # - instance_principal_client: shared across all certs with no profile secret
-    # - api_key_clients: cached per (namespace, secret_name) to avoid re-reading
-    #   the same K8s Secret for every cert that shares the same credentials.
-    instance_principal_client = None
-    api_key_clients: dict = {}
+    certs_client = build_oci_client_workload_identity()
 
     errors = []
     synced = 0
@@ -298,7 +243,6 @@ def main():
         cert_name,
         secret_name,
         oci_cert_id,
-        oci_profile_secret,
         oci_cert_name,
         oci_compartment_id,
     ) in list_annotated_certificates(custom_api):
@@ -306,22 +250,6 @@ def main():
         print(f"Syncing {ns}/{cert_name} (secret: {secret_name}, {mode})")
         try:
             tls_crt, tls_key = read_tls_secret(core_api, ns, secret_name)
-
-            # Build OCI client (API key or instance principal).
-            if oci_profile_secret is not None:
-                oci_profile_secret = oci_profile_secret.strip()
-                if not oci_profile_secret:
-                    raise ValueError(
-                        f"{ns}/{cert_name}: annotation '{OCI_PROFILE_SECRET_ANNOTATION}' is present but empty"
-                    )
-                cache_key = (ns, oci_profile_secret)
-                if cache_key not in api_key_clients:
-                    api_key_clients[cache_key] = build_oci_client_from_secret(core_api, ns, oci_profile_secret)
-                certs_client = api_key_clients[cache_key]
-            else:
-                if instance_principal_client is None:
-                    instance_principal_client = build_oci_client_instance_principal()
-                certs_client = instance_principal_client
 
             # Push content to OCI.
             if oci_cert_name:

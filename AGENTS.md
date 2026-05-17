@@ -31,32 +31,35 @@ tests/
 
 ## How It Works
 
-1. cert-manager `Certificate` objects are annotated with the target OCI cert OCID:
+1. cert-manager `Certificate` objects are annotated with the target OCI cert name + compartment (or legacy OCID):
    ```yaml
    annotations:
-     oci-cert-sync/certificate-ocid: "ocid1.certificate.oc1.<region>.xxxxx"
+     oci-cert-sync/certificate-name: "my-oci-cert-name"
+     oci-cert-sync/compartment-id:   "ocid1.compartment.oc1..aaa..."
    ```
 2. The CronJob runs daily, lists all annotated `Certificate` objects cluster-wide,
-   reads their K8s TLS Secrets, and calls `CertificatesManagementClient.update_certificate()`
-   to import the new cert/key into OCI.
+   reads their K8s TLS Secrets, and calls the OCI Certificates Management API to
+   create or update the IMPORTED certificate.
 3. OCI LB automatically picks up the latest certificate version — no Terraform change needed on rotation.
-4. Authentication: OCI instance principal (OKE node identity) by default, or per-cert
-   API key credentials from a K8s Secret (see `oci-cert-sync/oci-profile-secret` annotation).
+4. Authentication: **OKE Workload Identity exclusively** (`OkeWorkloadIdentityResourcePrincipalSigner`).
+   The CronJob SA must be annotated with `oci.oraclecloud.com/workload-identity: "true"`.
+   No API key credentials or instance principal are used.
 
 ## Key Code Paths
 
 - **`list_annotated_certificates(custom_api)`** — lists all `cert-manager.io/v1` Certificate
-  objects cluster-wide; yields `(namespace, name, secretName, ociCertOcid, ociProfileSecret)`
-  for annotated ones. `ociProfileSecret` is `None` when the `oci-cert-sync/oci-profile-secret`
-  annotation is absent (→ instance principal auth).
-- **`build_oci_client_from_secret(core_api, namespace, secret_name)`** — reads OCI API key
-  credentials from a K8s Secret; raises `ValueError` with context on missing/invalid fields.
+  objects cluster-wide; yields 6-tuples `(namespace, name, secretName, ociCertOcid, ociCertName, ociCompartmentId)`
+  for annotated ones.
+- **`build_oci_client_workload_identity()`** — creates a single shared `CertificatesManagementClient`
+  using `OkeWorkloadIdentityResourcePrincipalSigner`. Called once in `main()` before the sync loop.
 - **`read_tls_secret(core_api, namespace, secret_name)`** — reads K8s Secret, base64-decodes
   `tls.crt` and `tls.key`.
+- **`find_oci_cert(certs_client, compartment_id, cert_name)`** — looks up an OCI Certificate by name.
+- **`create_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key)`** — creates a new IMPORTED OCI Certificate; uses a deterministic `opc_retry_token` and handles 409 conflicts idempotently.
+- **`ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key)`** — find-or-create wrapper; returns `(ocid, was_created)`.
 - **`push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)`** — calls
   `update_certificate()` with `UpdateCertificateByImportingConfigDetails` (config_type=IMPORTED).
-- **`main()`** — orchestrates all of the above; API key clients are cached per
-  `(namespace, secret_name)`; exits 1 if any cert fails (others still sync).
+- **`main()`** — creates one shared WI client, iterates annotated certs, calls ensure/push; exits 1 if any cert fails (others still sync).
 
 ## OCI SDK Notes
 
@@ -113,6 +116,6 @@ Before pushing any change:
 - [ ] `ruff check --line-length=120 .` — no issues
 - [ ] `ruff format --check --line-length=120 .` — no formatting drift
 - [ ] If changing `push_to_oci()`: use `update_certificate()` not `create_certificate_version()`
-- [ ] If changing the annotation key: update both `sync.py` and `tests/test_sync.py`
+- [ ] If changing annotation keys: update both `sync.py` and `tests/test_sync.py`
 - [ ] PR title follows Conventional Commits (`type(scope): description`)
 - [ ] Never commit OCI credentials, kubeconfig, or internal OCID values
