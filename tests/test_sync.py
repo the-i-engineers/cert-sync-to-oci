@@ -17,15 +17,12 @@ def _make_cert(
     name,
     secret_name,
     annotation_value=None,
-    profile_secret=None,
     cert_name=None,
     compartment_id=None,
 ):
     metadata = {"namespace": ns, "name": name, "annotations": {}}
     if annotation_value:
         metadata["annotations"][sync.ANNOTATION_CERT_OCID] = annotation_value
-    if profile_secret:
-        metadata["annotations"][sync.OCI_PROFILE_SECRET_ANNOTATION] = profile_secret
     if cert_name:
         metadata["annotations"][sync.ANNOTATION_CERT_NAME] = cert_name
     if compartment_id:
@@ -56,19 +53,8 @@ def test_list_annotated_certificates_returns_annotated_only():
     results = list(sync.list_annotated_certificates(api))
 
     assert len(results) == 2
-    assert results[0] == ("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None, None)
-    assert results[1] == ("ns3", "cert-c", "secret-c", "ocid1.certificate.oc1..ccc", None, None, None)
-
-
-def test_list_annotated_certificates_with_oci_profile_secret():
-    certs = [
-        _make_cert("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", "oci-creds"),
-    ]
-    api = FakeCustomApi(certs)
-    results = list(sync.list_annotated_certificates(api))
-
-    assert len(results) == 1
-    assert results[0] == ("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", "oci-creds", None, None)
+    assert results[0] == ("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None)
+    assert results[1] == ("ns3", "cert-c", "secret-c", "ocid1.certificate.oc1..ccc", None, None)
 
 
 def test_list_annotated_certificates_no_annotations():
@@ -113,162 +99,31 @@ def test_read_tls_secret_decodes_base64():
 
 
 # ---------------------------------------------------------------------------
-# build_oci_client_from_secret
+# build_oci_client_workload_identity
 # ---------------------------------------------------------------------------
 
 
-def _make_oci_profile_secret(tenancy, user, region, fingerprint, private_key, passphrase=None):
-    def enc(s):
-        return base64.b64encode(s.encode()).decode()
-
-    data = {
-        "tenancy": enc(tenancy),
-        "user": enc(user),
-        "region": enc(region),
-        "fingerprint": enc(fingerprint),
-        "privateKey": enc(private_key),
-    }
-    if passphrase is not None:
-        data["privateKeyPassphrase"] = enc(passphrase)
-    return types.SimpleNamespace(data=data)
-
-
-def test_build_oci_client_from_secret(monkeypatch):
-    captured_config = {}
-
-    class FakeCertsManagementClient:
-        def __init__(self, config):
-            captured_config.update(config)
+def test_build_oci_client_workload_identity(monkeypatch):
+    signer_calls = []
+    client_calls = []
 
     monkeypatch.setattr(
-        "oci.certificates_management.CertificatesManagementClient",
-        FakeCertsManagementClient,
+        "oci.auth.signers.OkeWorkloadIdentitySigner",
+        lambda: signer_calls.append(1) or types.SimpleNamespace(),
+        raising=False,
     )
 
-    fake_secret = _make_oci_profile_secret(
-        tenancy="ocid1.tenancy.oc1..t",
-        user="ocid1.user.oc1..u",
-        region="us-phoenix-1",
-        fingerprint="aa:bb:cc",
-        private_key="-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n",
-        passphrase="s3cr3t",
-    )
+    class FakeCertsClient:
+        def __init__(self, config, signer):
+            client_calls.append((config, signer))
 
-    class FakeCoreApi:
-        def read_namespaced_secret(self, name, namespace):
-            return fake_secret
+    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", FakeCertsClient)
 
-    sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
+    sync.build_oci_client_workload_identity()
 
-    assert captured_config["tenancy"] == "ocid1.tenancy.oc1..t"
-    assert captured_config["user"] == "ocid1.user.oc1..u"
-    assert captured_config["region"] == "us-phoenix-1"
-    assert captured_config["fingerprint"] == "aa:bb:cc"
-    assert "KEY" in captured_config["key_content"]
-    assert captured_config["pass_phrase"] == "s3cr3t"
-
-
-def test_build_oci_client_from_secret_no_passphrase(monkeypatch):
-    captured_config = {}
-
-    class FakeCertsManagementClient:
-        def __init__(self, config):
-            captured_config.update(config)
-
-    monkeypatch.setattr(
-        "oci.certificates_management.CertificatesManagementClient",
-        FakeCertsManagementClient,
-    )
-
-    fake_secret = _make_oci_profile_secret(
-        tenancy="ocid1.tenancy.oc1..t",
-        user="ocid1.user.oc1..u",
-        region="us-phoenix-1",
-        fingerprint="aa:bb:cc",
-        private_key="KEY_PEM",
-        # no passphrase key
-    )
-
-    class FakeCoreApi:
-        def read_namespaced_secret(self, name, namespace):
-            return fake_secret
-
-    sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
-
-    assert "pass_phrase" not in captured_config
-
-
-def test_build_oci_client_from_secret_missing_one_key(monkeypatch):
-    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
-    fake_secret = _make_oci_profile_secret(
-        tenancy="ocid1.tenancy.oc1..t",
-        user="ocid1.user.oc1..u",
-        region="us-phoenix-1",
-        fingerprint="aa:bb:cc",
-        private_key="KEY_PEM",
-    )
-    # Remove one required key
-    del fake_secret.data["privateKey"]
-
-    class FakeCoreApi:
-        def read_namespaced_secret(self, name, namespace):
-            return fake_secret
-
-    with pytest.raises(ValueError) as exc_info:
-        sync.build_oci_client_from_secret(FakeCoreApi(), "cert-manager", "oci-creds")
-
-    msg = str(exc_info.value)
-    assert "cert-manager/oci-creds" in msg
-    assert "privateKey" in msg
-    assert "Required keys:" in msg
-
-
-def test_build_oci_client_from_secret_missing_multiple_keys(monkeypatch):
-    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
-    fake_secret = _make_oci_profile_secret(
-        tenancy="ocid1.tenancy.oc1..t",
-        user="ocid1.user.oc1..u",
-        region="us-phoenix-1",
-        fingerprint="aa:bb:cc",
-        private_key="KEY_PEM",
-    )
-    del fake_secret.data["tenancy"]
-    del fake_secret.data["fingerprint"]
-
-    class FakeCoreApi:
-        def read_namespaced_secret(self, name, namespace):
-            return fake_secret
-
-    with pytest.raises(ValueError) as exc_info:
-        sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
-
-    msg = str(exc_info.value)
-    assert "tenancy" in msg
-    assert "fingerprint" in msg
-
-
-def test_build_oci_client_from_secret_invalid_base64(monkeypatch):
-    monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", lambda **kw: None)
-    fake_secret = _make_oci_profile_secret(
-        tenancy="ocid1.tenancy.oc1..t",
-        user="ocid1.user.oc1..u",
-        region="us-phoenix-1",
-        fingerprint="aa:bb:cc",
-        private_key="KEY_PEM",
-    )
-    # Corrupt the tenancy value (not valid base64)
-    fake_secret.data["tenancy"] = "!!!not-base64!!!"
-
-    class FakeCoreApi:
-        def read_namespaced_secret(self, name, namespace):
-            return fake_secret
-
-    with pytest.raises(ValueError) as exc_info:
-        sync.build_oci_client_from_secret(FakeCoreApi(), "ns1", "oci-creds")
-
-    msg = str(exc_info.value)
-    assert "ns1/oci-creds" in msg
-    assert "'tenancy'" in msg
+    assert len(signer_calls) == 1
+    assert len(client_calls) == 1
+    assert client_calls[0][0] == {}  # empty config dict for WI
 
 
 # ---------------------------------------------------------------------------
@@ -309,40 +164,37 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# main — instance principal path (no oci-profile-secret annotation)
+# main — workload identity path
 # ---------------------------------------------------------------------------
 
 
-def test_main_uses_instance_principal_when_no_profile_secret(monkeypatch):
+def test_main_uses_workload_identity(monkeypatch):
     built = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: built.append("ip") or object())
-    monkeypatch.setattr(
-        "sync.build_oci_client_from_secret", lambda *a: (_ for _ in ()).throw(AssertionError("should not be called"))
-    )
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: built.append("wi") or object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
-        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None, None)]),
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None)]),
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
     monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
 
     sync.main()
-    assert built == ["ip"]
+    assert built == ["wi"]
 
 
-def test_main_instance_principal_created_once_for_multiple_certs(monkeypatch):
+def test_main_workload_identity_client_created_once(monkeypatch):
     built = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: built.append("ip") or object())
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: built.append("wi") or object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
         lambda api: iter(
             [
-                ("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None, None),
-                ("ns2", "cert-b", "secret-b", "ocid1..bbb", None, None, None),
+                ("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None),
+                ("ns2", "cert-b", "secret-b", "ocid1..bbb", None, None),
             ]
         ),
     )
@@ -354,44 +206,16 @@ def test_main_instance_principal_created_once_for_multiple_certs(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# main — API key path (oci-profile-secret annotation present)
-# ---------------------------------------------------------------------------
-
-
-def test_main_uses_api_key_when_profile_secret_set(monkeypatch):
-    built_from_secret = []
-
-    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr(
-        "sync.build_oci_client_instance_principal",
-        lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
-    )
-    monkeypatch.setattr(
-        "sync.build_oci_client_from_secret",
-        lambda core_api, ns, name: built_from_secret.append((ns, name)) or object(),
-    )
-    monkeypatch.setattr(
-        "sync.list_annotated_certificates",
-        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", "oci-creds", None, None)]),
-    )
-    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
-    monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
-
-    sync.main()
-    assert built_from_secret == [("ns1", "oci-creds")]
-
-
-# ---------------------------------------------------------------------------
 # main — error path
 # ---------------------------------------------------------------------------
 
 
 def test_main_exits_nonzero_on_error(monkeypatch):
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
-        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None, None)]),
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None)]),
     )
     monkeypatch.setattr(
         "sync.read_tls_secret",
@@ -405,22 +229,21 @@ def test_main_exits_nonzero_on_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# main — happy path (mixed auth)
+# main — happy path
 # ---------------------------------------------------------------------------
 
 
-def test_main_success_mixed_auth(monkeypatch):
+def test_main_success(monkeypatch):
     pushed = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
-    monkeypatch.setattr("sync.build_oci_client_from_secret", lambda *a: object())
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
         lambda api: iter(
             [
-                ("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None, None),  # instance principal
-                ("ns2", "cert-b", "secret-b", "ocid1..bbb", "oci-creds", None, None),  # API key
+                ("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None),
+                ("ns2", "cert-b", "secret-b", "ocid1..bbb", None, None),
             ]
         ),
     )
@@ -438,63 +261,6 @@ def test_main_success_mixed_auth(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# main — empty annotation value raises error
-# ---------------------------------------------------------------------------
-
-
-def test_main_empty_profile_secret_annotation_raises_error(monkeypatch):
-    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr(
-        "sync.build_oci_client_instance_principal",
-        lambda: (_ for _ in ()).throw(AssertionError("should not fall back to instance principal")),
-    )
-    monkeypatch.setattr(
-        "sync.list_annotated_certificates",
-        # annotation present but empty (whitespace)
-        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", "  ", None, None)]),
-    )
-    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
-
-    with pytest.raises(SystemExit) as exc_info:
-        sync.main()
-
-    assert exc_info.value.code == 1
-
-
-# ---------------------------------------------------------------------------
-# main — API key client cached across certs sharing same secret
-# ---------------------------------------------------------------------------
-
-
-def test_main_api_key_client_cached_for_same_secret(monkeypatch):
-    build_calls = []
-
-    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
-    monkeypatch.setattr(
-        "sync.build_oci_client_from_secret",
-        lambda core_api, ns, name: build_calls.append((ns, name)) or object(),
-    )
-    monkeypatch.setattr(
-        "sync.list_annotated_certificates",
-        lambda api: iter(
-            [
-                ("ns1", "cert-a", "secret-a", "ocid1..aaa", "oci-creds", None, None),
-                ("ns1", "cert-b", "secret-b", "ocid1..bbb", "oci-creds", None, None),  # same secret
-                ("ns1", "cert-c", "secret-c", "ocid1..ccc", "other-creds", None, None),  # different secret
-            ]
-        ),
-    )
-    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
-    monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
-
-    sync.main()
-
-    # oci-creds built once, other-creds built once → 2 total builds
-    assert build_calls == [("ns1", "oci-creds"), ("ns1", "other-creds")]
-
-
-# ---------------------------------------------------------------------------
 # list_annotated_certificates — name-based mode
 # ---------------------------------------------------------------------------
 
@@ -507,7 +273,7 @@ def test_list_annotated_certificates_with_cert_name():
     results = list(sync.list_annotated_certificates(api))
 
     assert len(results) == 1
-    assert results[0] == ("ns1", "cert-a", "secret-a", None, None, "my-oci-cert", "ocid1.compartment..cmp")
+    assert results[0] == ("ns1", "cert-a", "secret-a", None, "my-oci-cert", "ocid1.compartment..cmp")
 
 
 def test_list_annotated_certificates_cert_name_without_compartment_skips(capsys):
@@ -666,12 +432,12 @@ def test_main_name_based_creates_and_skips_push(monkeypatch):
     ensure_calls = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
         lambda api: iter(
             [
-                ("ns1", "cert-a", "secret-a", None, None, "my-oci-cert", "ocid1.compartment..cmp"),
+                ("ns1", "cert-a", "secret-a", None, "my-oci-cert", "ocid1.compartment..cmp"),
             ]
         ),
     )
@@ -696,12 +462,12 @@ def test_main_name_based_existing_calls_push(monkeypatch):
     push_calls = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
-    monkeypatch.setattr("sync.build_oci_client_instance_principal", lambda: object())
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
     monkeypatch.setattr(
         "sync.list_annotated_certificates",
         lambda api: iter(
             [
-                ("ns1", "cert-a", "secret-a", None, None, "my-oci-cert", "ocid1.compartment..cmp"),
+                ("ns1", "cert-a", "secret-a", None, "my-oci-cert", "ocid1.compartment..cmp"),
             ]
         ),
     )
@@ -776,8 +542,8 @@ def test_list_annotated_certificates_strips_cert_name_and_compartment():
     api = FakeCustomApi(certs)
     results = list(sync.list_annotated_certificates(api))
     assert len(results) == 1
-    assert results[0][5] == "my-cert"  # oci_cert_name stripped
-    assert results[0][6] == "ocid1.compartment..cmp"  # oci_compartment_id stripped
+    assert results[0][4] == "my-cert"  # oci_cert_name stripped
+    assert results[0][5] == "ocid1.compartment..cmp"  # oci_compartment_id stripped
 
 
 # ---------------------------------------------------------------------------
