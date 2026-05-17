@@ -108,8 +108,8 @@ def test_build_oci_client_workload_identity(monkeypatch):
     client_calls = []
 
     monkeypatch.setattr(
-        "oci.auth.signers.OkeWorkloadIdentityResourcePrincipalSigner",
-        lambda: signer_calls.append(1) or types.SimpleNamespace(),
+        "oci.auth.signers.get_oke_workload_identity_resource_principal_signer",
+        lambda **kw: signer_calls.append(1) or types.SimpleNamespace(),
     )
 
     class FakeCertsClient:
