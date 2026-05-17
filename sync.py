@@ -117,7 +117,7 @@ def build_oci_client_workload_identity():
     oci.oraclecloud.com/workload-identity: "true" and a matching IAM workload
     identity policy must be in place. No credentials are stored in the cluster.
     """
-    signer = oci.auth.signers.OkeWorkloadIdentityResourcePrincipalSigner()
+    signer = oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
     return oci.certificates_management.CertificatesManagementClient(config={}, signer=signer)
 
 
