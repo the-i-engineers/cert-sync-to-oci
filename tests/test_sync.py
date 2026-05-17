@@ -107,9 +107,11 @@ def test_build_oci_client_workload_identity(monkeypatch):
     signer_calls = []
     client_calls = []
 
+    fake_signer = types.SimpleNamespace(region="eu-zurich-1")
+
     monkeypatch.setattr(
         "oci.auth.signers.get_oke_workload_identity_resource_principal_signer",
-        lambda **kw: signer_calls.append(1) or types.SimpleNamespace(),
+        lambda **kw: signer_calls.append(1) or fake_signer,
     )
 
     class FakeCertsClient:
@@ -122,7 +124,8 @@ def test_build_oci_client_workload_identity(monkeypatch):
 
     assert len(signer_calls) == 1
     assert len(client_calls) == 1
-    assert client_calls[0][0] == {}  # empty config dict for WI
+    assert client_calls[0][0] == {"region": "eu-zurich-1"}  # region propagated from signer
+    assert client_calls[0][1] is fake_signer
 
 
 # ---------------------------------------------------------------------------
