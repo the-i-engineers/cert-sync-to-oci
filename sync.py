@@ -118,7 +118,7 @@ def build_oci_client_workload_identity():
     identity policy must be in place. No credentials are stored in the cluster.
     """
     signer = oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
-    return oci.certificates_management.CertificatesManagementClient(config={}, signer=signer)
+    return oci.certificates_management.CertificatesManagementClient(config={"region": signer.region}, signer=signer)
 
 
 def read_tls_secret(core_api, namespace, secret_name):
