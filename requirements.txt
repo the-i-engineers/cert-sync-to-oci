@@ -1,2 +1,2 @@
 oci==2.174.0
-kubernetes
+kubernetes==35.0.0
