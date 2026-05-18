@@ -1,2 +1,2 @@
-oci
+oci==2.174.0
 kubernetes
