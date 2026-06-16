@@ -166,6 +166,83 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# prune_old_versions
+# ---------------------------------------------------------------------------
+
+
+def _make_version(version_number, stages=None):
+    return types.SimpleNamespace(version_number=version_number, stages=stages or [])
+
+
+def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
+    deleted = []
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            # 7 versions; newest first after sorting
+            items = [_make_version(i) for i in range(1, 8)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(
+            self, certificate_id, certificate_version_number, schedule_certificate_version_deletion_details
+        ):
+            deleted.append(certificate_version_number)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    # versions 1 and 2 should be scheduled for deletion (oldest two)
+    assert sorted(deleted) == [1, 2]
+
+
+def test_prune_old_versions_skips_current_stage(monkeypatch):
+    deleted = []
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [
+                _make_version(1, stages=["CURRENT"]),  # should be skipped
+                _make_version(2),
+                _make_version(3),
+                _make_version(4),
+                _make_version(5),
+                _make_version(6),
+            ]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(
+            self, certificate_id, certificate_version_number, schedule_certificate_version_deletion_details
+        ):
+            deleted.append(certificate_version_number)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    # version 1 is beyond keep=5 but has CURRENT stage — must not be deleted
+    assert deleted == []
+
+
+def test_prune_old_versions_non_fatal_on_error(capsys):
+    class BrokenClient:
+        def list_certificate_versions(self, **kw):
+            raise RuntimeError("OCI down")
+
+    sync.prune_old_versions(BrokenClient(), "ocid1.cert.test")
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "OCI down" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # main — workload identity path
 # ---------------------------------------------------------------------------
 
