@@ -307,6 +307,30 @@ def test_main_exits_nonzero_on_error(monkeypatch):
     assert exc_info.value.code == 1
 
 
+def test_main_prune_called_even_when_push_fails(monkeypatch):
+    """prune_old_versions must run in the finally block even when push_to_oci raises."""
+    pruned = []
+
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr(
+        "sync.push_to_oci",
+        lambda *a: (_ for _ in ()).throw(RuntimeError("LimitExceeded")),
+    )
+    monkeypatch.setattr("sync.prune_old_versions", lambda client, cert_id: pruned.append(cert_id))
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main()
+
+    assert exc_info.value.code == 1  # push failure → non-zero exit
+    assert pruned == ["ocid1..aaa"]  # prune still ran
+
+
 # ---------------------------------------------------------------------------
 # main — happy path
 # ---------------------------------------------------------------------------
