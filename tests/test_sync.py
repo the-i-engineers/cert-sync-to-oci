@@ -166,6 +166,83 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# prune_old_versions
+# ---------------------------------------------------------------------------
+
+
+def _make_version(version_number, stages=None):
+    return types.SimpleNamespace(version_number=version_number, stages=stages or [])
+
+
+def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
+    deleted = []
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            # 7 versions; newest first after sorting
+            items = [_make_version(i) for i in range(1, 8)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(
+            self, certificate_id, certificate_version_number, schedule_certificate_version_deletion_details
+        ):
+            deleted.append(certificate_version_number)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    # versions 1 and 2 should be scheduled for deletion (oldest two)
+    assert sorted(deleted) == [1, 2]
+
+
+def test_prune_old_versions_skips_current_stage(monkeypatch):
+    deleted = []
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [
+                _make_version(1, stages=["CURRENT"]),  # should be skipped
+                _make_version(2),
+                _make_version(3),
+                _make_version(4),
+                _make_version(5),
+                _make_version(6),
+            ]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(
+            self, certificate_id, certificate_version_number, schedule_certificate_version_deletion_details
+        ):
+            deleted.append(certificate_version_number)
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    # version 1 is beyond keep=5 but has CURRENT stage — must not be deleted
+    assert deleted == []
+
+
+def test_prune_old_versions_non_fatal_on_error(capsys):
+    class BrokenClient:
+        def list_certificate_versions(self, **kw):
+            raise RuntimeError("OCI down")
+
+    sync.prune_old_versions(BrokenClient(), "ocid1.cert.test")
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "OCI down" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # main — workload identity path
 # ---------------------------------------------------------------------------
 
@@ -228,6 +305,30 @@ def test_main_exits_nonzero_on_error(monkeypatch):
         sync.main()
 
     assert exc_info.value.code == 1
+
+
+def test_main_prune_called_even_when_push_fails(monkeypatch):
+    """prune_old_versions must run in the finally block even when push_to_oci raises."""
+    pruned = []
+
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr(
+        "sync.push_to_oci",
+        lambda *a: (_ for _ in ()).throw(RuntimeError("LimitExceeded")),
+    )
+    monkeypatch.setattr("sync.prune_old_versions", lambda client, cert_id: pruned.append(cert_id))
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main()
+
+    assert exc_info.value.code == 1  # push failure → non-zero exit
+    assert pruned == ["ocid1..aaa"]  # prune still ran
 
 
 # ---------------------------------------------------------------------------

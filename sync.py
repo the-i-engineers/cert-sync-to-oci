@@ -37,6 +37,7 @@ cluster, namespace, and service account.
 import base64
 import hashlib
 import sys
+from datetime import datetime, timedelta, timezone
 
 import oci
 from kubernetes import client, config as k8s_config
@@ -209,6 +210,30 @@ def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
     return ocid, True
 
 
+def prune_old_versions(certs_client, cert_id, keep=5):
+    """Schedule deletion of old certificate versions, keeping the newest `keep`.
+
+    Called after every push attempt (success or failure) so that LimitExceeded
+    errors free headroom for the next run. Errors are non-fatal.
+    """
+    try:
+        response = certs_client.list_certificate_versions(certificate_id=cert_id)
+        versions = sorted(response.data.items, key=lambda v: v.version_number, reverse=True)
+        to_delete = [v for v in versions[keep:] if "CURRENT" not in (v.stages or [])]
+        deletion_time = datetime.now(timezone.utc) + timedelta(days=1)
+        for v in to_delete:
+            certs_client.schedule_certificate_version_deletion(
+                certificate_id=cert_id,
+                certificate_version_number=v.version_number,
+                schedule_certificate_version_deletion_details=oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails(
+                    time_of_deletion=deletion_time,
+                ),
+            )
+            print(f"  ✓ scheduled deletion of cert version {v.version_number}")
+    except Exception as exc:
+        print(f"  ⚠ WARNING: could not prune old versions for {cert_id}: {exc}", file=sys.stderr)
+
+
 def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
     # LE tls.crt contains the full chain (leaf + intermediates).
     # OCI expects cert_chain_pem = intermediates; certificate_pem = leaf.
@@ -259,9 +284,15 @@ def main():
                 if created:
                     print(f"  ✓ created new OCI cert '{oci_cert_name}' ({oci_cert_id})")
                     synced += 1
-                    continue  # content already set at creation time
-            push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
-            synced += 1
+                    continue  # content already set at creation time; no old versions to prune
+            try:
+                push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
+                synced += 1
+            except Exception as push_exc:
+                print(f"  ✗ ERROR: {push_exc}", file=sys.stderr)
+                errors.append(f"{ns}/{cert_name}: {push_exc}")
+            finally:
+                prune_old_versions(certs_client, oci_cert_id)
         except Exception as exc:
             print(f"  ✗ ERROR: {exc}", file=sys.stderr)
             errors.append(f"{ns}/{cert_name}: {exc}")
