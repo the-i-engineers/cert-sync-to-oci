@@ -239,6 +239,22 @@ def prune_old_versions(certs_client, cert_id, keep=5):
         print(f"  ⚠ WARNING: could not prune old versions for {cert_id}: {exc}", file=sys.stderr)
 
 
+def cert_pushed_today(certs_client, cert_id):
+    """Return True if the CURRENT cert version was already created today (UTC).
+
+    Called after prune_old_versions to avoid pushing when the cert is already
+    up to date for the day. Uses the same list_certificate_versions call target
+    as prune but issues a separate request.
+    # ponytail: two list_certificate_versions calls per cert (prune + freshness);
+    #           combine into one if OCI rate limits become a problem.
+    """
+    response = certs_client.list_certificate_versions(certificate_id=cert_id)
+    current = next((v for v in response.data.items if "CURRENT" in (v.stages or [])), None)
+    if current is None:
+        return False
+    return current.time_created.date() == datetime.now(timezone.utc).date()
+
+
 def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
     # LE tls.crt contains the full chain (leaf + intermediates).
     # OCI expects cert_chain_pem = intermediates; certificate_pem = leaf.
@@ -291,6 +307,10 @@ def main():
                     synced += 1
                     continue  # content already set at creation time; no old versions to prune
             prune_old_versions(certs_client, oci_cert_id)  # prune before push: cert is ACTIVE, not UPDATING
+            if cert_pushed_today(certs_client, oci_cert_id):
+                print(f"  ↩ already synced today, skipping push")
+                synced += 1
+                continue
             try:
                 push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
                 synced += 1
