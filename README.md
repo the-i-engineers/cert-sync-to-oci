@@ -95,6 +95,42 @@ spec:
 | `oci-cert-sync/compartment-id` | name-based | OCID of the compartment where the OCI Certificate lives or should be created. |
 | `oci-cert-sync/certificate-ocid` | OCID | OCID of an existing OCI Certificate to update. Cannot be combined with `certificate-name`. |
 
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CERT_SYNC_CHECK_FRESHNESS` | _(unset)_ | When set to any non-empty value, skip the push if the CURRENT OCI cert version was already created today (UTC). Useful for manual re-runs where idempotency is preferred. By default (unset) every run always pushes. |
+
+## Manual runs / forcing a re-sync
+
+To trigger a one-off sync outside the regular CronJob schedule, use `kubectl create job`:
+
+```bash
+kubectl create job cert-sync-manual \
+  --from=cronjob/cert-sync-to-oci \
+  -n cert-manager
+```
+
+This runs with the same image and environment as the scheduled job and always pushes
+(default behaviour, no freshness check).
+
+To run idempotently — skipping certs whose CURRENT OCI version was already pushed today —
+patch in `CERT_SYNC_CHECK_FRESHNESS`:
+
+```bash
+kubectl create job cert-sync-manual-idempotent \
+  --from=cronjob/cert-sync-to-oci \
+  -n cert-manager \
+  --dry-run=client -o yaml \
+| kubectl patch --local -f - \
+    --patch '{"spec":{"template":{"spec":{"containers":[{"name":"cert-sync-to-oci","env":[{"name":"CERT_SYNC_CHECK_FRESHNESS","value":"1"}]}]}}}}' \
+    -o yaml \
+| kubectl apply -f -
+```
+
+> **Tip:** the job name must be unique; delete it once done with
+> `kubectl delete job cert-sync-manual -n cert-manager`.
+
 ## Development
 
 ```bash
