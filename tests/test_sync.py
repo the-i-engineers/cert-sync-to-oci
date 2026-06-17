@@ -185,8 +185,8 @@ def test_oci_error_falls_back_to_str_for_other_exceptions():
 # ---------------------------------------------------------------------------
 
 
-def _make_version(version_number, stages=None):
-    return types.SimpleNamespace(version_number=version_number, stages=stages or [])
+def _make_version(version_number, stages=None, time_of_deletion=None):
+    return types.SimpleNamespace(version_number=version_number, stages=stages or [], time_of_deletion=time_of_deletion)
 
 
 def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
@@ -305,6 +305,37 @@ def test_prune_old_versions_warning_includes_version_number(monkeypatch, capsys)
 
     captured = capsys.readouterr()
     assert "version 2" in captured.err or "version 1" in captured.err
+
+
+def test_prune_old_versions_skips_already_scheduled(monkeypatch):
+    """Versions with time_of_deletion already set must not be re-scheduled."""
+    deleted = []
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [
+                _make_version(1, time_of_deletion="2026-06-18T00:00:00Z"),  # already scheduled
+                _make_version(2),  # not yet scheduled → should be deleted
+                _make_version(3),
+                _make_version(4),
+                _make_version(5),
+                _make_version(6),
+                _make_version(7),
+            ]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(self, certificate_id, certificate_version_number, **kw):
+            deleted.append(certificate_version_number)
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    assert deleted == [2]  # version 1 skipped (already scheduled); version 2 scheduled
+    assert 1 not in deleted
 
 
 # ---------------------------------------------------------------------------
