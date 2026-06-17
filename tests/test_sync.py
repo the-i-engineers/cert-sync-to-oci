@@ -257,10 +257,15 @@ def test_prune_old_versions_non_fatal_on_error(capsys):
     assert "OCI down" in captured.err
 
 
-def test_prune_old_versions_continues_after_per_version_failure(capsys):
+def test_prune_old_versions_continues_after_per_version_failure(monkeypatch, capsys):
     """A deletion failure on one version must not abort pruning of remaining versions."""
     deleted = []
     fail_on = {2}  # version 2 will raise; version 1 (also beyond keep=5) should still be deleted
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
 
     class FakeCertsClient:
         def list_certificate_versions(self, certificate_id):
@@ -280,8 +285,13 @@ def test_prune_old_versions_continues_after_per_version_failure(capsys):
     assert "409 IncorrectState" in captured.err
 
 
-def test_prune_old_versions_warning_includes_version_number(capsys):
+def test_prune_old_versions_warning_includes_version_number(monkeypatch, capsys):
     """Warning message for a deletion failure must include the failing version number."""
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
 
     class FakeCertsClient:
         def list_certificate_versions(self, certificate_id):
@@ -411,7 +421,12 @@ def test_main_prune_runs_before_push(monkeypatch):
 
 
 def test_main_logs_pushing_before_push(monkeypatch, capsys):
-    """main() should log 'pushing' before calling push_to_oci."""
+    """main() must emit a 'pushing' log line before push_to_oci is called."""
+    log_at_push_time = []
+
+    def fake_push(*a):
+        log_at_push_time.append(capsys.readouterr().out)
+
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
     monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
     monkeypatch.setattr(
@@ -420,11 +435,12 @@ def test_main_logs_pushing_before_push(monkeypatch, capsys):
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
     monkeypatch.setattr("sync.prune_old_versions", lambda *a: None)
-    monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
+    monkeypatch.setattr("sync.push_to_oci", fake_push)
 
     sync.main()
 
-    assert "pushing" in capsys.readouterr().out.lower()
+    assert log_at_push_time, "push_to_oci was never called"
+    assert "pushing" in log_at_push_time[0].lower()
 
 
 def test_main_success(monkeypatch):

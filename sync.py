@@ -215,7 +215,7 @@ def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
 
 
 def _oci_error(exc):
-    """Format an OCI ServiceError as 'status code: message'; fall back to str() for anything else."""
+    """Format an OCI ServiceError as '{status} {code}: {message}'; fall back to str() for anything else."""
     if isinstance(exc, oci.exceptions.ServiceError):
         return f"{exc.status} {exc.code}: {exc.message}"
     return str(exc)
