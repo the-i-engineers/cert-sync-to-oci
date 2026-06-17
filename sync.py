@@ -214,6 +214,13 @@ def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
     return ocid, True
 
 
+def _oci_error(exc):
+    """Format an OCI ServiceError as '{status} {code}: {message}'; fall back to str() for anything else."""
+    if isinstance(exc, oci.exceptions.ServiceError):
+        return f"{exc.status} {exc.code}: {exc.message}"
+    return str(exc)
+
+
 def prune_old_versions(certs_client, cert_id, keep=5):
     """Schedule deletion of old certificate versions, keeping the newest `keep`.
 
@@ -227,16 +234,22 @@ def prune_old_versions(certs_client, cert_id, keep=5):
         to_delete = [v for v in versions[keep:] if "CURRENT" not in (v.stages or [])]
         deletion_time = datetime.now(timezone.utc) + timedelta(days=1)
         for v in to_delete:
-            certs_client.schedule_certificate_version_deletion(
-                certificate_id=cert_id,
-                certificate_version_number=v.version_number,
-                schedule_certificate_version_deletion_details=oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails(
-                    time_of_deletion=deletion_time,
-                ),
-            )
-            print(f"  ✓ scheduled deletion of cert version {v.version_number}")
+            try:
+                certs_client.schedule_certificate_version_deletion(
+                    certificate_id=cert_id,
+                    certificate_version_number=v.version_number,
+                    schedule_certificate_version_deletion_details=oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails(
+                        time_of_deletion=deletion_time,
+                    ),
+                )
+                print(f"  ✓ scheduled deletion of cert version {v.version_number}")
+            except Exception as exc:
+                print(
+                    f"  ⚠ WARNING: could not schedule deletion of version {v.version_number}: {_oci_error(exc)}",
+                    file=sys.stderr,
+                )
     except Exception as exc:
-        print(f"  ⚠ WARNING: could not prune old versions for {cert_id}: {exc}", file=sys.stderr)
+        print(f"  ⚠ WARNING: could not list cert versions for {cert_id}: {_oci_error(exc)}", file=sys.stderr)
 
 
 def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
@@ -291,6 +304,7 @@ def main():
                     synced += 1
                     continue  # content already set at creation time; no old versions to prune
             prune_old_versions(certs_client, oci_cert_id)  # prune before push: cert is ACTIVE, not UPDATING
+            print(f"  pushing new version to OCI cert {oci_cert_id}")
             try:
                 push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
                 synced += 1

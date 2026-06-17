@@ -167,6 +167,20 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _oci_error
+# ---------------------------------------------------------------------------
+
+
+def test_oci_error_formats_service_error():
+    exc = oci.exceptions.ServiceError(409, "IncorrectState", {}, "conflicting lifecycle state")
+    assert sync._oci_error(exc) == "409 IncorrectState: conflicting lifecycle state"
+
+
+def test_oci_error_falls_back_to_str_for_other_exceptions():
+    assert sync._oci_error(ValueError("boom")) == "boom"
+
+
+# ---------------------------------------------------------------------------
 # prune_old_versions
 # ---------------------------------------------------------------------------
 
@@ -241,6 +255,56 @@ def test_prune_old_versions_non_fatal_on_error(capsys):
     captured = capsys.readouterr()
     assert "WARNING" in captured.err
     assert "OCI down" in captured.err
+
+
+def test_prune_old_versions_continues_after_per_version_failure(monkeypatch, capsys):
+    """A deletion failure on one version must not abort pruning of remaining versions."""
+    deleted = []
+    fail_on = {2}  # version 2 will raise; version 1 (also beyond keep=5) should still be deleted
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [_make_version(n) for n in range(1, 8)]  # versions 1-7, keep=5 → delete 1,2
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(self, certificate_id, certificate_version_number, **kw):
+            if certificate_version_number in fail_on:
+                raise oci.exceptions.ServiceError(409, "IncorrectState", {}, "conflicting state")
+            deleted.append(certificate_version_number)
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    assert deleted == [1]  # version 1 succeeded despite version 2 failing
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "409 IncorrectState" in captured.err
+
+
+def test_prune_old_versions_warning_includes_version_number(monkeypatch, capsys):
+    """Warning message for a deletion failure must include the failing version number."""
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [_make_version(n) for n in range(1, 8)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+        def schedule_certificate_version_deletion(self, certificate_id, certificate_version_number, **kw):
+            raise oci.exceptions.ServiceError(409, "IncorrectState", {}, "conflicting state")
+
+    sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
+
+    captured = capsys.readouterr()
+    assert "version 2" in captured.err or "version 1" in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +418,29 @@ def test_main_prune_runs_before_push(monkeypatch):
 # ---------------------------------------------------------------------------
 # main — happy path
 # ---------------------------------------------------------------------------
+
+
+def test_main_logs_pushing_before_push(monkeypatch, capsys):
+    """main() must emit a 'pushing' log line before push_to_oci is called."""
+    log_at_push_time = []
+
+    def fake_push(*a):
+        log_at_push_time.append(capsys.readouterr().out)
+
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.prune_old_versions", lambda *a: None)
+    monkeypatch.setattr("sync.push_to_oci", fake_push)
+
+    sync.main()
+
+    assert log_at_push_time, "push_to_oci was never called"
+    assert "pushing" in log_at_push_time[0].lower()
 
 
 def test_main_success(monkeypatch):
