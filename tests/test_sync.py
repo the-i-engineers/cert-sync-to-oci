@@ -171,8 +171,8 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_version(version_number, stages=None):
-    return types.SimpleNamespace(version_number=version_number, stages=stages or [])
+def _make_version(version_number, stages=None, time_created=None):
+    return types.SimpleNamespace(version_number=version_number, stages=stages or [], time_created=time_created)
 
 
 def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
@@ -244,6 +244,59 @@ def test_prune_old_versions_non_fatal_on_error(capsys):
 
 
 # ---------------------------------------------------------------------------
+# cert_pushed_today
+# ---------------------------------------------------------------------------
+
+
+def test_cert_pushed_today_returns_true_for_current_version_today(monkeypatch):
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).replace(hour=1, minute=0, second=0, microsecond=0)
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [_make_version(3, stages=["CURRENT"], time_created=today)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+    assert sync.cert_pushed_today(FakeCertsClient(), "ocid1.cert.test") is True
+
+
+def test_cert_pushed_today_returns_false_for_current_version_yesterday(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [_make_version(3, stages=["CURRENT"], time_created=yesterday)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+    assert sync.cert_pushed_today(FakeCertsClient(), "ocid1.cert.test") is False
+
+
+def test_cert_pushed_today_returns_false_when_no_current_version():
+    class FakeCertsClient:
+        def list_certificate_versions(self, certificate_id):
+            items = [_make_version(1), _make_version(2)]
+            return types.SimpleNamespace(data=types.SimpleNamespace(items=items))
+
+    assert sync.cert_pushed_today(FakeCertsClient(), "ocid1.cert.test") is False
+
+
+def test_cert_pushed_today_returns_false_and_warns_on_api_error(capsys):
+    class BrokenClient:
+        def list_certificate_versions(self, certificate_id):
+            raise RuntimeError("OCI unavailable")
+
+    result = sync.cert_pushed_today(BrokenClient(), "ocid1.cert.test")
+
+    assert result is False
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "ocid1.cert.test" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # main — workload identity path
 # ---------------------------------------------------------------------------
 
@@ -258,6 +311,7 @@ def test_main_uses_workload_identity(monkeypatch):
         lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1.certificate.oc1..aaa", None, None)]),
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
     monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
 
     sync.main()
@@ -279,6 +333,7 @@ def test_main_workload_identity_client_created_once(monkeypatch):
         ),
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
     monkeypatch.setattr("sync.push_to_oci", lambda *a: None)
 
     sync.main()
@@ -324,6 +379,7 @@ def test_main_prune_called_even_when_push_fails(monkeypatch):
         lambda *a: (_ for _ in ()).throw(RuntimeError("LimitExceeded")),
     )
     monkeypatch.setattr("sync.prune_old_versions", lambda client, cert_id: pruned.append(cert_id))
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
 
     with pytest.raises(SystemExit) as exc_info:
         sync.main()
@@ -344,6 +400,7 @@ def test_main_prune_runs_before_push(monkeypatch):
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
     monkeypatch.setattr("sync.prune_old_versions", lambda *a: order.append("prune"))
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
     monkeypatch.setattr("sync.push_to_oci", lambda *a: order.append("push"))
 
     sync.main()
@@ -351,8 +408,63 @@ def test_main_prune_runs_before_push(monkeypatch):
     assert order == ["prune", "push"]
 
 
-# ---------------------------------------------------------------------------
-# main — happy path
+def test_main_skips_push_when_already_pushed_today(monkeypatch, capsys):
+    """When CERT_SYNC_CHECK_FRESHNESS is set and cert was already pushed today, skip push."""
+    pushed = []
+
+    monkeypatch.setenv("CERT_SYNC_CHECK_FRESHNESS", "1")
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.prune_old_versions", lambda *a: None)
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: True)
+    monkeypatch.setattr("sync.push_to_oci", lambda *a: pushed.append("pushed"))
+
+    sync.main()
+
+    assert pushed == []  # push was skipped
+    captured = capsys.readouterr()
+    assert "already synced today" in captured.out
+    assert "1 synced" in captured.out  # still counted
+
+
+def test_main_check_freshness_enabled_logs_on_startup(monkeypatch, capsys):
+    """CERT_SYNC_CHECK_FRESHNESS set logs a notice at startup."""
+    monkeypatch.setenv("CERT_SYNC_CHECK_FRESHNESS", "1")
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr("sync.list_annotated_certificates", lambda api: iter([]))
+
+    sync.main()
+
+    assert "CERT_SYNC_CHECK_FRESHNESS" in capsys.readouterr().out
+
+
+def test_main_default_pushes_even_when_cert_pushed_today(monkeypatch):
+    """Without CERT_SYNC_CHECK_FRESHNESS, push always runs regardless of freshness."""
+    pushed = []
+
+    monkeypatch.delenv("CERT_SYNC_CHECK_FRESHNESS", raising=False)
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.prune_old_versions", lambda *a: None)
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: True)
+    monkeypatch.setattr("sync.push_to_oci", lambda *a: pushed.append("pushed"))
+
+    sync.main()
+
+    assert pushed == ["pushed"]
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -371,6 +483,7 @@ def test_main_success(monkeypatch):
         ),
     )
     monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT_PEM", "KEY_PEM"))
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
     monkeypatch.setattr(
         "sync.push_to_oci",
         lambda certs_client, oci_cert_id, tls_crt, tls_key: pushed.append(oci_cert_id),
@@ -599,6 +712,7 @@ def test_main_name_based_existing_calls_push(monkeypatch):
         "sync.ensure_oci_cert",
         lambda client, cmp, name, crt, key: ("ocid1.cert..existing", False),
     )
+    monkeypatch.setattr("sync.cert_pushed_today", lambda *a: False)
     monkeypatch.setattr(
         "sync.push_to_oci",
         lambda client, ocid, crt, key: push_calls.append(ocid),
