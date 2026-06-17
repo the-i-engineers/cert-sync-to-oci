@@ -217,8 +217,9 @@ def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
 def prune_old_versions(certs_client, cert_id, keep=5):
     """Schedule deletion of old certificate versions, keeping the newest `keep`.
 
-    Called after every push attempt (success or failure) so that LimitExceeded
-    errors free headroom for the next run. Errors are non-fatal.
+    Called before push_to_oci while the cert is in ACTIVE state — scheduling
+    deletions is rejected by OCI when the cert is in UPDATING state. Errors
+    are non-fatal (logged as warnings).
     """
     try:
         response = certs_client.list_certificate_versions(certificate_id=cert_id)

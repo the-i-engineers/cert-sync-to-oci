@@ -116,7 +116,7 @@ def test_build_oci_client_workload_identity(monkeypatch):
 
     class FakeCertsClient:
         def __init__(self, config, signer, retry_strategy=None):
-            client_calls.append((config, signer))
+            client_calls.append((config, signer, retry_strategy))
 
     monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", FakeCertsClient)
 
@@ -126,6 +126,7 @@ def test_build_oci_client_workload_identity(monkeypatch):
     assert len(client_calls) == 1
     assert client_calls[0][0] == {"region": "eu-zurich-1"}  # region propagated from signer
     assert client_calls[0][1] is fake_signer
+    assert client_calls[0][2] is oci.retry.DEFAULT_RETRY_STRATEGY  # retry strategy wired up
 
 
 # ---------------------------------------------------------------------------
