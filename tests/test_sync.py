@@ -115,7 +115,7 @@ def test_build_oci_client_workload_identity(monkeypatch):
     )
 
     class FakeCertsClient:
-        def __init__(self, config, signer):
+        def __init__(self, config, signer, retry_strategy=None):
             client_calls.append((config, signer))
 
     monkeypatch.setattr("oci.certificates_management.CertificatesManagementClient", FakeCertsClient)
@@ -308,7 +308,7 @@ def test_main_exits_nonzero_on_error(monkeypatch):
 
 
 def test_main_prune_called_even_when_push_fails(monkeypatch):
-    """prune_old_versions must run in the finally block even when push_to_oci raises."""
+    """prune_old_versions runs before push_to_oci, so it always runs even when push raises."""
     pruned = []
 
     monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
@@ -328,7 +328,26 @@ def test_main_prune_called_even_when_push_fails(monkeypatch):
         sync.main()
 
     assert exc_info.value.code == 1  # push failure → non-zero exit
-    assert pruned == ["ocid1..aaa"]  # prune still ran
+    assert pruned == ["ocid1..aaa"]  # prune ran before push
+
+
+def test_main_prune_runs_before_push(monkeypatch):
+    """prune_old_versions must be called before push_to_oci (cert is ACTIVE, not UPDATING)."""
+    order = []
+
+    monkeypatch.setattr("sync.load_k8s_client", lambda: (object(), object()))
+    monkeypatch.setattr("sync.build_oci_client_workload_identity", lambda: object())
+    monkeypatch.setattr(
+        "sync.list_annotated_certificates",
+        lambda api: iter([("ns1", "cert-a", "secret-a", "ocid1..aaa", None, None)]),
+    )
+    monkeypatch.setattr("sync.read_tls_secret", lambda *a: ("CERT", "KEY"))
+    monkeypatch.setattr("sync.prune_old_versions", lambda *a: order.append("prune"))
+    monkeypatch.setattr("sync.push_to_oci", lambda *a: order.append("push"))
+
+    sync.main()
+
+    assert order == ["prune", "push"]
 
 
 # ---------------------------------------------------------------------------
