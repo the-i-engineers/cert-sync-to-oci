@@ -231,7 +231,7 @@ def prune_old_versions(certs_client, cert_id, keep=5):
     try:
         response = certs_client.list_certificate_versions(certificate_id=cert_id)
         versions = sorted(response.data.items, key=lambda v: v.version_number, reverse=True)
-        to_delete = [v for v in versions[keep:] if "CURRENT" not in (v.stages or [])]
+        to_delete = [v for v in versions[keep:] if "CURRENT" not in (v.stages or []) and v.time_of_deletion is None]
         deletion_time = datetime.now(timezone.utc) + timedelta(days=1)
         for v in to_delete:
             try:
