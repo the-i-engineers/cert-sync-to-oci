@@ -207,6 +207,10 @@ def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
         "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
         lambda **kw: types.SimpleNamespace(**kw),
     )
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: types.SimpleNamespace(data=fn(**kw).data.items),
+    )
 
     sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
 
@@ -238,6 +242,10 @@ def test_prune_old_versions_skips_current_stage(monkeypatch):
         "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
         lambda **kw: types.SimpleNamespace(**kw),
     )
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: types.SimpleNamespace(data=fn(**kw).data.items),
+    )
 
     sync.prune_old_versions(FakeCertsClient(), "ocid1.cert.test", keep=5)
 
@@ -245,12 +253,17 @@ def test_prune_old_versions_skips_current_stage(monkeypatch):
     assert deleted == []
 
 
-def test_prune_old_versions_non_fatal_on_error(capsys):
-    class BrokenClient:
-        def list_certificate_versions(self, **kw):
-            raise RuntimeError("OCI down")
+def test_prune_old_versions_non_fatal_on_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: (_ for _ in ()).throw(RuntimeError("OCI down")),
+    )
 
-    sync.prune_old_versions(BrokenClient(), "ocid1.cert.test")
+    class FakeClient:
+        def list_certificate_versions(self, **kw):
+            pass  # never called — pagination is monkeypatched to raise
+
+    sync.prune_old_versions(FakeClient(), "ocid1.cert.test")
 
     captured = capsys.readouterr()
     assert "WARNING" in captured.err
@@ -265,6 +278,10 @@ def test_prune_old_versions_continues_after_per_version_failure(monkeypatch, cap
     monkeypatch.setattr(
         "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
         lambda **kw: types.SimpleNamespace(**kw),
+    )
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: types.SimpleNamespace(data=fn(**kw).data.items),
     )
 
     class FakeCertsClient:
@@ -292,6 +309,10 @@ def test_prune_old_versions_warning_includes_version_number(monkeypatch, capsys)
         "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
         lambda **kw: types.SimpleNamespace(**kw),
     )
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: types.SimpleNamespace(data=fn(**kw).data.items),
+    )
 
     class FakeCertsClient:
         def list_certificate_versions(self, certificate_id):
@@ -315,6 +336,10 @@ def test_prune_old_versions_skips_already_scheduled(monkeypatch):
         "oci.certificates_management.models.ScheduleCertificateVersionDeletionDetails",
         lambda **kw: types.SimpleNamespace(**kw),
     )
+    monkeypatch.setattr(
+        "oci.pagination.list_call_get_all_results",
+        lambda fn, **kw: types.SimpleNamespace(data=fn(**kw).data.items),
+    )
 
     class FakeCertsClient:
         def list_certificate_versions(self, certificate_id):
@@ -336,6 +361,25 @@ def test_prune_old_versions_skips_already_scheduled(monkeypatch):
 
     assert deleted == [2]  # version 1 skipped (already scheduled); version 2 scheduled
     assert 1 not in deleted
+
+
+def test_prune_old_versions_uses_pagination(monkeypatch):
+    """prune_old_versions must fetch all pages via list_call_get_all_results, not just the first page."""
+    paginated_calls = []
+
+    def fake_list_call_get_all_results(fn, **kw):
+        paginated_calls.append("called")
+        return types.SimpleNamespace(data=[])  # empty — nothing to prune
+
+    monkeypatch.setattr("oci.pagination.list_call_get_all_results", fake_list_call_get_all_results)
+
+    class FakeClient:
+        def list_certificate_versions(self, **kw):
+            pass  # never called — pagination is monkeypatched
+
+    sync.prune_old_versions(FakeClient(), "ocid1.cert.test")
+
+    assert paginated_calls == ["called"]
 
 
 # ---------------------------------------------------------------------------
