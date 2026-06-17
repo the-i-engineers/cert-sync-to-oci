@@ -119,7 +119,11 @@ def build_oci_client_workload_identity():
     identity policy must be in place. No credentials are stored in the cluster.
     """
     signer = oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
-    return oci.certificates_management.CertificatesManagementClient(config={"region": signer.region}, signer=signer)
+    return oci.certificates_management.CertificatesManagementClient(
+        config={"region": signer.region},
+        signer=signer,
+        retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY,
+    )
 
 
 def read_tls_secret(core_api, namespace, secret_name):
@@ -213,8 +217,9 @@ def ensure_oci_cert(certs_client, compartment_id, cert_name, tls_crt, tls_key):
 def prune_old_versions(certs_client, cert_id, keep=5):
     """Schedule deletion of old certificate versions, keeping the newest `keep`.
 
-    Called after every push attempt (success or failure) so that LimitExceeded
-    errors free headroom for the next run. Errors are non-fatal.
+    Called before push_to_oci while the cert is in ACTIVE state — scheduling
+    deletions is rejected by OCI when the cert is in UPDATING state. Errors
+    are non-fatal (logged as warnings).
     """
     try:
         response = certs_client.list_certificate_versions(certificate_id=cert_id)
@@ -285,14 +290,13 @@ def main():
                     print(f"  ✓ created new OCI cert '{oci_cert_name}' ({oci_cert_id})")
                     synced += 1
                     continue  # content already set at creation time; no old versions to prune
+            prune_old_versions(certs_client, oci_cert_id)  # prune before push: cert is ACTIVE, not UPDATING
             try:
                 push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
                 synced += 1
             except Exception as push_exc:
                 print(f"  ✗ ERROR: {push_exc}", file=sys.stderr)
                 errors.append(f"{ns}/{cert_name}: {push_exc}")
-            finally:
-                prune_old_versions(certs_client, oci_cert_id)
         except Exception as exc:
             print(f"  ✗ ERROR: {exc}", file=sys.stderr)
             errors.append(f"{ns}/{cert_name}: {exc}")
