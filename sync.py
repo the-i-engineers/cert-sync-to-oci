@@ -89,7 +89,7 @@ def list_annotated_certificates(custom_api):
         if oci_cert_id and oci_cert_name:
             print(
                 f"  ⚠ SKIP {ref}: both '{ANNOTATION_CERT_OCID}' and '{ANNOTATION_CERT_NAME}' "
-                f"are set — use one or the other",
+                "are set — use one or the other",
                 file=sys.stderr,
             )
             continue
