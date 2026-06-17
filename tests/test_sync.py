@@ -171,8 +171,8 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_version(version_number, stages=None, time_created=None):
-    return types.SimpleNamespace(version_number=version_number, stages=stages or [], time_created=time_created)
+def _make_version(version_number, stages=None):
+    return types.SimpleNamespace(version_number=version_number, stages=stages or [])
 
 
 def test_prune_old_versions_schedules_deletion_beyond_keep(monkeypatch):
@@ -351,6 +351,8 @@ def test_main_prune_runs_before_push(monkeypatch):
     assert order == ["prune", "push"]
 
 
+# ---------------------------------------------------------------------------
+# main — happy path
 # ---------------------------------------------------------------------------
 
 
