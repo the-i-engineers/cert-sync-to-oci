@@ -154,6 +154,7 @@ def test_push_to_oci_calls_update_certificate(monkeypatch):
         "oci.certificates_management.models.UpdateCertificateDetails",
         lambda **kw: types.SimpleNamespace(**kw),
     )
+    monkeypatch.setattr("sync.wait_for_cert_active", lambda *a, **kw: None)
 
     client = FakeCertsClient()
     sync.push_to_oci(client, "ocid1.certificate.oc1..test", "CERT_PEM", "KEY_PEM")
@@ -936,3 +937,103 @@ def test_create_oci_cert_non_409_raises(monkeypatch):
         sync.create_oci_cert(FakeClient(), "ocid1.compartment..cmp", "my-cert", "CERT", "KEY")
 
     assert exc_info.value.status == 403
+
+
+# ---------------------------------------------------------------------------
+# wait_for_cert_active
+# ---------------------------------------------------------------------------
+
+
+def _make_cert_response(lifecycle_state, lifecycle_details=None):
+    return types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            lifecycle_state=lifecycle_state,
+            lifecycle_details=lifecycle_details,
+        )
+    )
+
+
+def test_wait_for_cert_active_returns_when_active(monkeypatch):
+    """Returns immediately when lifecycle_state is already ACTIVE."""
+    calls = []
+
+    class FakeClient:
+        def get_certificate(self, certificate_id):
+            calls.append(certificate_id)
+            return _make_cert_response("ACTIVE")
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    sync.wait_for_cert_active(FakeClient(), "ocid1..test")
+    assert calls == ["ocid1..test"]
+
+
+def test_wait_for_cert_active_raises_on_failed(monkeypatch):
+    """Raises RuntimeError with lifecycle_details when cert reaches FAILED state."""
+
+    class FakeClient:
+        def get_certificate(self, certificate_id):
+            return _make_cert_response("FAILED", "SAN mismatch: new SAN does not match existing SAN")
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="FAILED") as exc_info:
+        sync.wait_for_cert_active(FakeClient(), "ocid1..test")
+
+    assert "SAN mismatch" in str(exc_info.value)
+
+
+def test_wait_for_cert_active_polls_until_active(monkeypatch):
+    """Polls while UPDATING and returns once ACTIVE."""
+    states = iter(["UPDATING", "UPDATING", "ACTIVE"])
+    slept = []
+
+    class FakeClient:
+        def get_certificate(self, certificate_id):
+            return _make_cert_response(next(states))
+
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+    sync.wait_for_cert_active(FakeClient(), "ocid1..test", poll_interval=3)
+    assert len(slept) == 2  # slept twice before ACTIVE
+
+
+def test_wait_for_cert_active_raises_on_timeout(monkeypatch):
+    """Raises RuntimeError when the cert stays UPDATING past the timeout."""
+    import time as time_module
+
+    call_count = [0]
+    fake_now = [0.0]
+
+    def fake_time():
+        fake_now[0] += 10
+        return fake_now[0]
+
+    class FakeClient:
+        def get_certificate(self, certificate_id):
+            call_count[0] += 1
+            return _make_cert_response("UPDATING")
+
+    monkeypatch.setattr(time_module, "sleep", lambda s: None)
+    monkeypatch.setattr(time_module, "monotonic", fake_time)
+    with pytest.raises(RuntimeError, match="[Tt]imeout"):
+        sync.wait_for_cert_active(FakeClient(), "ocid1..test", timeout=30, poll_interval=1)
+
+
+def test_push_to_oci_calls_wait_for_cert_active(monkeypatch):
+    """push_to_oci must wait for the async OCI update to complete."""
+    waited = []
+
+    monkeypatch.setattr(
+        "oci.certificates_management.models.UpdateCertificateDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+    monkeypatch.setattr(
+        "oci.certificates_management.models.UpdateCertificateByImportingConfigDetails",
+        lambda **kw: types.SimpleNamespace(**kw),
+    )
+
+    class FakeClient:
+        def update_certificate(self, certificate_id, update_certificate_details):
+            pass
+
+    monkeypatch.setattr("sync.wait_for_cert_active", lambda client, cert_id, **kw: waited.append(cert_id))
+    sync.push_to_oci(FakeClient(), "ocid1..test", "CERT", "KEY")
+    assert waited == ["ocid1..test"]
