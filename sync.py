@@ -37,6 +37,7 @@ cluster, namespace, and service account.
 import base64
 import hashlib
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import oci
@@ -254,6 +255,27 @@ def prune_old_versions(certs_client, cert_id, keep=5):
         print(f"  ⚠ WARNING: could not list cert versions for {cert_id}: {_oci_error(exc)}", file=sys.stderr)
 
 
+def wait_for_cert_active(certs_client, cert_id, timeout=120, poll_interval=5):
+    """Poll until the OCI cert leaves UPDATING state; raise if it reaches any non-ACTIVE state.
+
+    update_certificate() is asynchronous — OCI returns 200 immediately but validates
+    the cert content (including SAN constraints) in the background. Without this wait,
+    cert-sync reports success while OCI silently rejects the update.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        cert = certs_client.get_certificate(certificate_id=cert_id).data
+        state = cert.lifecycle_state
+        if state == "ACTIVE":
+            return
+        if state != "UPDATING":
+            details = getattr(cert, "lifecycle_details", None) or state
+            raise RuntimeError(f"OCI cert {cert_id} reached {state}: {details}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timeout waiting for OCI cert {cert_id} to become ACTIVE (still {state})")
+        time.sleep(poll_interval)
+
+
 def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
     # LE tls.crt contains the full chain (leaf + intermediates).
     # OCI expects cert_chain_pem = intermediates; certificate_pem = leaf.
@@ -270,6 +292,7 @@ def push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key):
         certificate_id=oci_cert_id,
         update_certificate_details=update_details,
     )
+    wait_for_cert_active(certs_client, oci_cert_id)
     print(f"  ✓ pushed new cert version to OCI cert {oci_cert_id}")
 
 
