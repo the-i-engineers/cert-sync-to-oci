@@ -41,7 +41,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import oci
-from kubernetes import client, config as k8s_config
+from kubernetes import client
+from kubernetes import config as k8s_config
 
 ANNOTATION_CERT_OCID = "oci-cert-sync/certificate-ocid"
 ANNOTATION_CERT_NAME = "oci-cert-sync/certificate-name"
@@ -246,12 +247,12 @@ def prune_old_versions(certs_client, cert_id, keep=5):
                     ),
                 )
                 print(f"  ✓ scheduled deletion of cert version {v.version_number}")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 print(
                     f"  ⚠ WARNING: could not schedule deletion of version {v.version_number}: {_oci_error(exc)}",
                     file=sys.stderr,
                 )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"  ⚠ WARNING: could not list cert versions for {cert_id}: {_oci_error(exc)}", file=sys.stderr)
 
 
@@ -333,10 +334,10 @@ def main():
             try:
                 push_to_oci(certs_client, oci_cert_id, tls_crt, tls_key)
                 synced += 1
-            except Exception as push_exc:
+            except Exception as push_exc:  # noqa: BLE001
                 print(f"  ✗ ERROR: {push_exc}", file=sys.stderr)
                 errors.append(f"{ns}/{cert_name}: {push_exc}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             print(f"  ✗ ERROR: {exc}", file=sys.stderr)
             errors.append(f"{ns}/{cert_name}: {exc}")
 

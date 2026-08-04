@@ -6,7 +6,6 @@ import pytest
 
 import sync
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -868,7 +867,7 @@ def test_create_oci_cert_passes_retry_token(monkeypatch):
     sync.create_oci_cert(FakeClient(), "ocid1.compartment..cmp", "my-cert", "CERT", "KEY")
 
     assert len(tokens_seen) == 1
-    expected = hashlib.sha256("ocid1.compartment..cmp:my-cert".encode()).hexdigest()[:64]
+    expected = hashlib.sha256(b"ocid1.compartment..cmp:my-cert").hexdigest()[:64]
     assert tokens_seen[0] == expected
 
 
