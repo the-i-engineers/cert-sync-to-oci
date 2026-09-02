@@ -74,32 +74,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  ci-required:
-    name: CI Required Check
+  status-check:
     needs: [ci, docker-build]
     if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check CI result
-        run: |
-          if [[ "${{ needs.ci.result }}" != "success" ]]; then
-            echo "CI did not succeed: ${{ needs.ci.result }}"
-            exit 1
-          fi
-          if [[ "${{ needs.docker-build.result }}" != "success" ]]; then
-            echo "Docker build did not succeed: ${{ needs.docker-build.result }}"
-            exit 1
-          fi
-          echo "CI passed"
-
-      - name: Job summary
-        if: always()
-        run: |
-          {
-            echo "| Field | Value |"
-            echo "|-------|-------|"
-            echo "| **CI result** | \`${{ needs.ci.result }}\` |"
-            echo "| **Docker build result** | \`${{ needs.docker-build.result }}\` |"
-            echo "| **Actor** | ${{ github.actor }} |"
-            echo "| **Event** | \`${{ github.event_name }}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+    uses: the-i-engineers/reusable-workflows/.github/workflows/status-check.yml@5.5.0
+    with:
+      result: >-
+        ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+            && 'failure' || 'success' }}
