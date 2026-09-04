@@ -23,6 +23,7 @@ tests/
 .github/
   workflows/
     ci.yml                  # lint + test on every PR
+    _status-check.yml       # local fork of reusable-workflows' status-check.yml (called by ci.yml)
     lint-pr-title.yml       # Conventional Commits PR title check
     daily-tag-release.yml   # daily semver tag via reusable workflow → fires release.yml
     release.yml             # builds multi-arch Docker image → pushes to GHCR
