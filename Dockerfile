@@ -3,7 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 ENV PYTHONUNBUFFERED=1 PATH=/root/.local/bin:$PATH
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
