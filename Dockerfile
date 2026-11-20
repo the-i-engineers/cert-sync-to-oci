@@ -1,11 +1,11 @@
 FROM python:3.14 AS builder
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM python:3.15-slim
-ENV PYTHONUNBUFFERED=1 PATH=/root/.local/bin:$PATH
+FROM python:3.14-slim
+ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder /install /usr/local
 COPY sync.py .
 ENTRYPOINT ["python", "/app/sync.py"]
