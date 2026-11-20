@@ -50,7 +50,7 @@ jobs:
           reporter: java-junit
 
       - name: Report coverage in PR
-        uses: MishaKav/pytest-coverage-comment@93af7d8b7260ffe62dd0eb35bebd01c544f204e9 # v1.12.5
+        uses: MishaKav/pytest-coverage-comment@4cfb48edc8f875ac019afdcfd97c48d78ad2b723 # v1.13.1
         with:
           pytest-xml-coverage-path: coverage.xml
 
