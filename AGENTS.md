@@ -14,7 +14,7 @@ platform cluster.
 
 ```
 sync.py                     # main sync script (entrypoint)
-Dockerfile                  # multi-arch image published to ghcr.io/the-i-engineers/cert-sync-to-oci
+Dockerfile                  # linux/amd64 image published to ghcr.io/the-i-engineers/cert-sync-to-oci
 requirements.txt            # runtime deps: oci, kubernetes
 requirements_dev.txt        # dev deps: ruff, pytest, pytest-cov
 tests/
@@ -26,7 +26,7 @@ tests/
     _status-check.yml       # local fork of reusable-workflows' status-check.yml (called by ci.yml)
     lint-pr-title.yml       # Conventional Commits PR title check
     daily-tag-release.yml   # daily semver tag via reusable workflow → fires release.yml
-    release.yml             # builds multi-arch Docker image → pushes to GHCR
+    release.yml             # builds linux/amd64 Docker image → pushes to GHCR
   dependabot.yml            # Actions weekly, pip weekly, docker weekly
 ```
 
@@ -99,7 +99,7 @@ docker build -t cert-sync-to-oci:dev .
 | `ci.yml` | PR to `main` | ruff lint + pytest |
 | `lint-pr-title.yml` | PR to `main` | Enforces Conventional Commits PR title |
 | `daily-tag-release.yml` | Cron 03:30 UTC + `workflow_dispatch` | Creates semver tag via reusable workflow; tag fires `release.yml` |
-| `release.yml` | `release: published` + `workflow_dispatch` | Builds multi-arch Docker image → pushes to `ghcr.io/the-i-engineers/cert-sync-to-oci` |
+| `release.yml` | `release: published` + `workflow_dispatch` | Builds linux/amd64 Docker image → pushes to `ghcr.io/the-i-engineers/cert-sync-to-oci` |
 
 **Bump rules** (Conventional Commits on commits since last tag):
 
