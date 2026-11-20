@@ -30,3 +30,8 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore"
+    # builder and runtime must share one Python minor (site-packages are copied between stages)
+    groups:
+      python-base-image:
+        patterns:
+          - "python"
